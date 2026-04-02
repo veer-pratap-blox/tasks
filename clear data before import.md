@@ -1,10 +1,5 @@
 # BLOX clear-data / clear-before-import — bug descriptions
 
-## End-to-end context (short)
-
-- **Frontend:** You step through the import wizard; each screen is chosen from `DataStepsForm` based on choices (data vs forecast, single vs multiple periods, one vs many indicators, time in rows vs columns, etc.). The top stepper shows one tick per “step” and highlights the active index.
-- **Backend:** Uploaded sheet data is loaded into Polars, reshaped to a normal “indicator + time + value (+ dimensions)” shape, then validated. **Preview** calls the same calculation as import but does not write to the database; it can attach **clear-before-import** stats (how many existing values would be cleared) when that option is enabled.
-- **Why that matters:** Bugs can come from (a) the UI showing the wrong step or summary, (b) preview not matching what will really happen, or (c) the parser being strict about blank cells and layout.
 
 ---
 
