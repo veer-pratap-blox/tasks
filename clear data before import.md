@@ -38,25 +38,38 @@ Users see **incoming file data** in the grid plus **separate summary numbers** (
 
 ---
 
-## 3. Auto-mapping indicators fails when time periods come from one row (wide layout)
+## 3. Time periods across columns are not auto-mapped to Blox periods
 
-**What you see:** With a wide P&amp;L-style sheet—**one row** of period labels and **rows** for each line—the automatic map from sheet names to model indicators is wrong or incomplete.
+### What you see
 
-**What is going wrong:** Auto-mapping uses **distinct values in the column you chose for indicator names**. Rows that are not real indicators (titles, blanks, section labels) and the **single row of month headers** interact so the engine sees noisy labels next to clean account names.
+When the file stores **each period in its own column** (wide layout), the wizard asks you to map **file columns** to **periods in Blox**. File columns are identified by internal names such as **`_1`**, **`_2`**, **`_3`**, … — **the numbering can start at any index** (e.g. `_1` may be the first data column, or the first period column, depending on layout); it does **not** have to start at `_2`.
 
-**Example sheet — cells that drive issue 3**
+**Expected:** If the sheet has a **row (or header row) where each column’s cell holds the real period label** (e.g. month and year text in the cells under `_1`, `_2`, `_3`, …), the product should use those labels to **suggest or fill** the mapping from each **`_n`** column to the correct Blox time period.
 
-| row (indicator / label column) | _1 | _2 | _3 | _4 | _5 | _6 | Issue 3 (what matters) |
-|----------------------------------|----|----|----|----|----|----|-------------------------|
-| profit and loss | _1 | _2 | _3 | _4 | _5 | _6 | **Noise** — not a model indicator; confuses name-based auto-map |
-| neural voice ltd | | | | | | | **Noise** — blank cells; may appear as empty/odd distinct value |
-| account | dec 2023 | jan 2024 | feb 2024 | mar 2024 | apr 2024 | may 2024 | **Time-in-one-row** — periods live here, not in the indicator column |
-| turnover | | | | | | | **Noise** — label row, often empty |
-| interest income | 0 | 0 | 0 | 0 | 0 | 0 | **Real indicator row** — should map cleanly |
-| other revenue | 0 | 0 | 0 | 0.02 | 0 | 0 | **Real indicator row** |
-| sales | 0 | 0 | 0 | 0 | 0 | 0 | **Real indicator row** |
+**Actual:** Those human-readable period strings are **not** used to auto-match Blox periods. You typically map **`_1` / `_2` / `_3` / …** to periods **manually**, one row at a time, which is slow and easy to get wrong.
 
-**Where issue 3 hits:** Mostly the **first column** (mixed titles + blanks + real line items) plus the **row that holds all period names** (`account` → `dec 2023` …). Auto-map sees too many non-indicator strings in the “names” column and/or the layout does not match what the multi-period + column-time path expects.
+### Example layout (period labels live in one row; amounts in rows below)
+
+Columns are shown here as **`_1` … `_6`** to match how the app refers to file columns. One row carries **calendar labels** per column; lower rows are **values** for those periods.
+
+| row (indicator / label column) | _1 | _2 | _3 | _4 | _5 | _6 | Role |
+|----------------------------------|----|----|----|----|----|----|------|
+| profit and loss | _1 | _2 | _3 | _4 | _5 | _6 | Layout / header noise — not the period-definition row. |
+| neural voice ltd | | | | | | | Blank or non-period row. |
+| account | dec 2023 | jan 2024 | feb 2024 | mar 2024 | apr 2024 | may 2024 | **Period row:** cell under each `_n` is the **period text** for that column; this is what should drive auto-mapping to Blox. |
+| turnover | | | | | | | Label row; often empty. |
+| interest income | 0 | 0 | 0 | 0 | 0 | 0 | Numeric data per period column. |
+| other revenue | 0 | 0 | 0 | 0.02 | 0 | 0 | Numeric data per period column. |
+| sales | 0 | 0 | 0 | 0 | 0 | 0 | Numeric data per period column. |
+
+### What is going wrong (plain language)
+
+The **mapping step only exposes generic column ids** (`_1`, `_2`, `_3`, …) on the file side. It does **not** infer Blox periods from the **period label row** (or equivalent header cells) that sits above the numbers. So users must **manually** align each **`_n`** with the right period in Blox, even when the sheet already spells out which month each column is.
+
+### Why it matters
+
+- Repeated manual work for every wide file.
+- Higher risk of mapping a column to the **wrong** Blox period when matching is done only by column index, not by the visible date/month text in the file.
 
 ---
 
