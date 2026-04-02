@@ -25,9 +25,6 @@ The behaviour below is **still largely true** on that branch, with one important
 
 Users see **incoming file data** in the grid plus **separate summary numbers** (updates, rows, skips, clears); that mix does **not** answer “what will the model look like after clear and import?” in one clear story — so the preview step can still feel **wrong or hard to read** even though **clear counts and scope text** are shown.
 
-### Scope note
-
-This is a **UX / completeness of preview** issue, not “the UI shows nothing about clearing” — on `BLOX-2001-clear-data`, clearing **is** reflected in the summary line when the API supplies it; the gap is **final-state clarity** and **alignment between the table and the clear+import story**.
 ---
 
 ## 2. Stepper ticks do not match the real wizard steps
