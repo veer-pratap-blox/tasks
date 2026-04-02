@@ -42,7 +42,7 @@ Users see **incoming file data** in the grid plus **separate summary numbers** (
 
 ### What you see
 
-When the file stores **each period in its own column** (wide layout), the wizard asks you to map **file columns** to **periods in Blox**. File columns are identified by internal names such as **`_1`**, **`_2`**, **`_3`**, … — **the numbering can start at any index** (e.g. `_1` may be the first data column, or the first period column, depending on layout); it does **not** have to start at `_2`.
+When the file stores **each period in its own column** (wide layout), the wizard asks you to map **file columns** to **periods in Blox**. File columns are identified by internal names such as **`_1`**, **`_2`**, **`_3`**, …
 
 **Expected:** If the sheet has a **row (or header row) where each column’s cell holds the real period label** (e.g. month and year text in the cells under `_1`, `_2`, `_3`, …), the product should use those labels to **suggest or fill** the mapping from each **`_n`** column to the correct Blox time period.
 
