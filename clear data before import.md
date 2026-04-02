@@ -5,7 +5,8 @@
 
 ## 1. Preview before import does not clearly show the right data (clear-before-import)
 
-### Verified on `BLOX-2001-clear-data`
+### Scope note
+This is a **UX / completeness of preview** issue, not “the UI shows nothing about clearing” — on `BLOX-2001-clear-data`, clearing **is** reflected in the summary line when the API supplies it; the gap is **final-state clarity** and **alignment between the table and the clear+import story**.
 
 The behaviour below is **still largely true** on that branch, with one important nuance.
 
