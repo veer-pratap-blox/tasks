@@ -8,14 +8,31 @@
 
 ---
 
-## 1. Preview before import does not clearly show the right data (with clear-before-import)
+## 1. Preview before import does not clearly show the right data (clear-before-import)
 
-**What you see:** On the step where you review what will be imported *after* choosing to clear existing data, the preview (table and/or the “X values will be updated / Y will be cleared” style summary) does not match what you expect: numbers, rows, or messaging feel wrong or hard to read.
+### Verified on `BLOX-2001-clear-data`
 
-**What is going wrong (conceptually):** Preview is meant to simulate the import without saving. With **clear before import**, two things happen in the product story: existing values in scope are removed, then new values from the file are applied. The UI may be mixing (i) raw file rows, (ii) rows after the engine drops or fills blanks, and (iii) counts of cells that will be cleared—so the **story** “what the model will look like after this run” is not aligned with what is on screen.
+The behaviour below is **still largely true** on that branch, with one important nuance.
 
-**In one sentence:** The preview step does not yet present a single, unambiguous picture of “file data + clear scope + final effect” for users.
+### What is already implemented
 
+- The **mapping preview** screen **does** surface clear-before-import when the API returns it.
+- The UI shows a line like **“N values will be cleared”**, plus optional **`clear_scope_description`**, **appended** to the existing **“values will be updated from … rows”** text.
+- Implementation reference: `traction-react/src/pages/ModelOverviewPage/Import/MappingDataSteps/MappedData.tsx` — the block that reads `mappedFileData.preview_run_result.summary`, including **`estimated_clear_count`** and **`clear_scope_description`**.
+
+### What is still missing (why the issue remains)
+
+- The **table under the tabs** is still driven by **`mappedFileData.response.indicator_data[...].actual_data`** — i.e. the **parsed file** / **“what we are loading”** view from **`calculate_actual_values(save_data=False)`**.
+- There is **no separate grid** for **“model after clear, then after apply”**.
+- There is **no single narrative** that ties **clear scope → then new values** to **what each cell will become** after the run.
+
+### User-visible problem (one sentence)
+
+Users see **incoming file data** in the grid plus **separate summary numbers** (updates, rows, skips, clears); that mix does **not** answer “what will the model look like after clear and import?” in one clear story — so the preview step can still feel **wrong or hard to read** even though **clear counts and scope text** are shown.
+
+### Scope note
+
+This is a **UX / completeness of preview** issue, not “the UI shows nothing about clearing” — on `BLOX-2001-clear-data`, clearing **is** reflected in the summary line when the API supplies it; the gap is **final-state clarity** and **alignment between the table and the clear+import story**.
 ---
 
 ## 2. Stepper ticks do not match the real wizard steps
