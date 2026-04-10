@@ -2,40 +2,8 @@
 
 This document captures the complete pattern table used by `favorable_direction.py`, including:
 
-- Nonsense / early-exit rules
-- Decrease patterns
-- Increase patterns
-- Default behavior when no pattern matches
 
-## Matching logic
-
-The heuristic matches against the normalized indicator name using:
-
-`re.search(pattern, name.lower().strip())`
-
-### Notes
-
-- Matching is done against the full lowercased, trimmed name.
-- A pattern can match anywhere in the string unless it uses anchors like `^` or `$`.
-- `\b` means a word boundary, so it typically matches whole words separated by spaces or punctuation.
-- Nonsense / early-exit rules are evaluated first and force the result to `increase` before the decrease/increase keyword lists are checked.
-
----
-
-## A. Nonsense / early rules -> `increase`
-
-| # | Pattern | Example names that match |
-|---|---|---|
-| A1 | `^[_\-\s\.]+$` | `---`, `___`, `   `, `...` |
-| A2 | `^\d+$` | `0`, `42`, `2024` |
-| A3 | `^[a-z]{1,2}\d*$` | `a`, `ab`, `a1`, `z9` |
-| A4 | `^(test|calc|check|data|input|raw|indicator|ind|block|demo|example|dummy|temp|misc|ref|flow)` | `test revenue`, `demo KPI`, `input 1`, `block total`, `temp metric` |
-| A5 | `workings` | `P&L workings`, `Model workings`, `---- Workings ----` |
-| A6 | `^---+$` | `---`, `-----` |
-
----
-
-## B. Decrease patterns
+##  Decrease patterns
 
 | # | Pattern | Example names that match |
 |---|---|---|
@@ -124,7 +92,7 @@ The heuristic matches against the normalized indicator name using:
 
 ---
 
-## C. Increase patterns
+##  Increase patterns
 
 | # | Pattern | Example names that match |
 |---|---|---|
@@ -190,7 +158,7 @@ The heuristic matches against the normalized indicator name using:
 
 ---
 
-## D. Default when no pattern matched
+##  Default when no pattern matched
 
 If none of the nonsense, decrease, or increase patterns match, the heuristic defaults to:
 
