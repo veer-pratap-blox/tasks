@@ -57,6 +57,7 @@ Prepare a complete Jira-style issue write-up that includes:
 - Only investigate, test, and document the findings.
 
 ### 3. Review the fix branch and prepare the Jira issue
+https://github.com/veer-pratap-blox/tasks/blob/main/nested_params_ouptut_api.md
 
 - Switch to the branch:
   - `fix/block-outputs-v2-nested-json-params`
