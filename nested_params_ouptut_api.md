@@ -48,37 +48,7 @@ The `/outputs/v2` endpoint must remain usable even when these fields are omitted
 
 ---
 
-## Fix Implemented
 
-### Request normalization helper
-Added request normalization in:
-
-- `modelAPI/util/block_outputs_request.py`
-
-### Helper behavior
-`parse_block_outputs_post_data(parser)` now:
-
-- starts with `parser.parse_args()`
-- merges `body["params"]` into the parsed arguments
-- allows top-level body keys to override nested `params` values
-- preserves query-string and form fallback behavior by keeping `parse_args()` first
-- applies defaults when values are missing or empty:
-  - `time_filter = "all"`
-  - `time_aggregation = "Y,Q,M"`
-  - `dim_sort = "ASC"`
-- coerces `dim_id` to `str` when present, because downstream handlers call `dim_id.split(",")`
-
-### Handlers updated
-The helper is now wired into all POST KPI handlers using the shared parser:
-
-- `modelAPI/resources/new_block_kpi.py`
-- `modelAPI/resources/block_kpi_v3.py`
-- `modelAPI/resources/block_kpi_v4.py`
-- `modelAPI/resources/block_kpi_v4_rust.py`
-
-For POST request handling, direct `parser.parse_args()` usage is replaced with `parse_block_outputs_post_data(parser)`.
-
----
 
 ## Expected Behavior After Fix
 
@@ -88,22 +58,6 @@ For POST request handling, direct `parser.parse_args()` usage is replaced with `
 | Nested `{ "params": { ... } }` JSON with `dim_id`, `scenario_id` | Works with the same pivot and payload shape as flat JSON |
 | Request omits `time_aggregation`, `time_filter`, `dim_sort` | Works and backend applies defaults |
 | `GET /block/{id}/outputs?...` | Unchanged |
-
----
-
-## Known Gaps / Out of Scope
-
-### Not covered in this fix
-- `indicator_filter` parity with legacy GET behavior  
-  Legacy `GET BlockKPI` filters indicators via `apply_filter_on_indicators`, while V4 POST does not currently guarantee the same behavior for `indicator_filter` in JSON. This should be tracked separately if parity is required.
-
-- Scenario resolution behavior  
-  Handlers still require a resolvable scenario, either explicit or base scenario. If neither exists, failure behavior is unchanged.
-
-### Out of scope
-- Frontend builder migration from legacy GET to POST
-- Full `indicator_filter` parity on V4 POST
-- Cross-request caching or broader performance work
 
 ---
 
