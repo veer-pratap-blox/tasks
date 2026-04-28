@@ -359,6 +359,16 @@ if not check_model_permission(user=current_user, model_id=model.id, action='is_d
 
 or `is_update`, depending on product decision.
 
+
+8.Access checks should return 403, not 401
+
+The plan says add tests confirming 403 on unauthorized access. That is good.
+
+Current code often uses unauthorized(), and some org role checks return 401. For RBAC, better convention:
+
+401 = not authenticated / invalid token
+403 = authenticated but not allowed
+
 ---
 
 ## Final Priority List
