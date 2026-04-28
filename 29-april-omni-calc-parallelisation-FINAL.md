@@ -1261,6 +1261,7 @@ metadata_cache.getattr(...)
 - Future worker-style execution path uses `PreloadedMetadata`.
 - Missing preloaded metadata fails early with a clear diagnostic.
 - Python callback loaders are not used in worker-ready paths.
+- No PyO3/Python callbacks should occur inside the Rust Omni-Calc execution hot path after preload. PyO3 should remain only at the Python boundary/preload stage.
 
 ### Rejected Designs
 
