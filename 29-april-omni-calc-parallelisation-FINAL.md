@@ -2740,3 +2740,1344 @@ Do not parallelize sequential groups initially.
 Do not allow worker execution to call Python.
 
 Do not change calculation semantics or output format as part of these issues.
+
+
+
+# Additional Omni-Calc Performance Issues: Data Structures, Clone Reduction, and Preloaded Data Usage
+
+## Context
+
+Branch:
+
+```text
+Blox-Dev / BLOX-2104-improve-preload-snapshot-py-rust-pass
+```
+
+GitHub:
+
+```text
+https://github.com/BloxSoftware/Blox-Dev/tree/BLOX-2104-improve-preload-snapshot-py-rust-pass
+```
+
+These issues are additional performance/refactor issues after the first 6 parallelization issues.
+
+The first 6 issues mainly cover:
+
+```text
+Issue 1 - Kahn-style scheduler foundation
+Issue 2 - Parallel ready-node execution with Rayon
+Issue 3 - Parallel final RecordBatch materialization
+Issue 4 - Parallel connected dimension preload
+Issue 5 - Parallel join-path creation/alignment
+Issue 6 - Parallel lookup-map aggregation
+```
+
+The following issues focus on improving performance by:
+
+```text
+better data structures
+faster column lookup
+less cloning
+reusing preloaded data
+avoiding Python callbacks in execution hot path
+making snapshots/evaluators/resolvers more reference-based
+```
+
+Important note:
+
+```text
+PyO3 should remain only at the Python boundary / preload stage.
+
+After metadata is preloaded into Rust, Omni-Calc execution should use Rust-owned preloaded data and should not call back into Python from the execution hot path.
+```
+
+---
+
+# ISSUE 7
+
+## Issue Type
+
+Performance / Tech Debt / Refactor
+
+---
+
+## Title
+
+Optimize `CalcObjectState` Column Storage and Lookup for Faster Execution and Merge
+
+---
+
+## Summary
+
+Refactor `CalcObjectState` column storage from linear `Vec<(String, Vec<T>)>` lookup patterns toward a faster indexed column layout.
+
+Currently, `CalcObjectState` stores number, string, and connected dimension columns as vectors of `(column_name, values)` tuples. Column lookup uses linear scans with `.iter().find(...)`, and duplicate checks are also linear. This is simple, but it becomes expensive for wide models with many indicators, properties, connected dimension columns, or repeated formula dependency lookups.
+
+This issue should improve column lookup, insertion, duplicate detection, and merge performance while preserving deterministic output ordering.
+
+---
+
+## Relevant Code Areas
+
+Primary file:
+
+```text
+modelAPI/omni-calc/src/engine/exec/state.rs
+```
+
+Related files:
+
+```text
+modelAPI/omni-calc/src/engine/exec/context.rs
+modelAPI/omni-calc/src/engine/exec/executor.rs
+modelAPI/omni-calc/src/engine/exec/steps/calculation.rs
+modelAPI/omni-calc/src/engine/exec/steps/input_handler/mod.rs
+modelAPI/omni-calc/src/engine/exec/get_source_data/resolver.rs
+modelAPI/omni-calc/src/engine/exec/formula_eval.rs
+```
+
+Current `CalcObjectState` structure:
+
+```rust
+pub struct CalcObjectState {
+    pub object_key: String,
+    pub object_type: CalcObjectType,
+
+    pub dim_columns: Vec<(String, Vec<String>)>,
+    pub row_count: usize,
+
+    pub number_columns: Vec<(String, Vec<f64>)>,
+    pub string_columns: Vec<(String, Vec<String>)>,
+    pub connected_dim_columns: Vec<(String, Vec<String>)>,
+
+    pub node_ids: HashSet<i64>,
+}
+```
+
+Current lookup pattern:
+
+```rust
+pub fn get_number_column(&self, name: &str) -> Option<&Vec<f64>> {
+    self.number_columns
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, v)| v)
+}
+```
+
+Similar lookup exists for:
+
+```rust
+get_string_column(...)
+get_connected_dim_column(...)
+```
+
+---
+
+## Current Behavior
+
+Columns are stored as ordered vectors:
+
+```rust
+Vec<(String, Vec<f64>)>
+Vec<(String, Vec<String>)>
+```
+
+This means every lookup scans the full list:
+
+```text
+number_columns[0]
+number_columns[1]
+number_columns[2]
+...
+```
+
+Column insertion is append-based:
+
+```rust
+pub fn add_number_column(&mut self, name: String, values: Vec<f64>) {
+    self.number_columns.push((name, values));
+}
+```
+
+Duplicate detection is usually performed by scanning existing columns before pushing, or later while building the final `RecordBatch`.
+
+---
+
+## Problem Statement
+
+For small models this is fine.
+
+For large/wide models, this becomes expensive because formula execution and merge paths repeatedly need to find columns by name.
+
+Problem areas:
+
+```text
+1. Linear lookup for every column access.
+2. Linear duplicate checks before merge/insertion.
+3. Repeated string comparisons for column names.
+4. Wider models become slower as number of indicators/properties grows.
+5. Merge phase from NodeOutput becomes slower if every output checks duplicates by scanning Vec.
+6. Resolver materialization and formula setup repeatedly walk column vectors.
+7. Parallel-ready design needs faster deterministic merges.
+```
+
+Example issue:
+
+```rust
+state.number_columns
+    .iter()
+    .find(|(name, _)| name == "ind123")
+```
+
+This is `O(number_of_columns)`.
+
+In a wide block with hundreds or thousands of columns, this cost repeats many times.
+
+---
+
+## Why This Matters for Parallelism
+
+Even if Issue 2 introduces Rayon-based parallel node execution, every worker/coordinator merge will still eventually need to access and insert columns.
+
+If column lookup remains linear, then the central merge phase can become a bottleneck.
+
+Target architecture from Issue 1:
+
+```text
+Worker calculates NodeOutput
+        ↓
+Coordinator merges NodeOutput
+        ↓
+Coordinator updates state/resolver
+```
+
+If merge does this for every output column:
+
+```rust
+state.number_columns.iter().any(|(name, _)| name == &col.0)
+```
+
+then parallel execution can be slowed by a serial `O(n)` merge bottleneck.
+
+So this issue improves both:
+
+```text
+current serial execution
+future parallel execution
+```
+
+---
+
+## Proposed Change
+
+Refactor column storage to preserve stable output order while also allowing fast lookup.
+
+Recommended design:
+
+```rust
+struct ColumnStore<T> {
+    order: Vec<String>,
+    values: HashMap<String, Vec<T>>,
+}
+```
+
+Or, to avoid duplicating column names:
+
+```rust
+struct ColumnStore<T> {
+    columns: Vec<(String, Vec<T>)>,
+    index: HashMap<String, usize>,
+}
+```
+
+Recommended first implementation:
+
+```rust
+struct ColumnStore<T> {
+    columns: Vec<(String, Vec<T>)>,
+    index: HashMap<String, usize>,
+}
+
+impl<T> ColumnStore<T> {
+    fn get(&self, name: &str) -> Option<&Vec<T>> {
+        self.index
+            .get(name)
+            .and_then(|idx| self.columns.get(*idx))
+            .map(|(_, values)| values)
+    }
+
+    fn contains(&self, name: &str) -> bool {
+        self.index.contains_key(name)
+    }
+
+    fn insert(&mut self, name: String, values: Vec<T>) {
+        if self.index.contains_key(&name) {
+            return;
+        }
+
+        let idx = self.columns.len();
+        self.index.insert(name.clone(), idx);
+        self.columns.push((name, values));
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &(String, Vec<T>)> {
+        self.columns.iter()
+    }
+}
+```
+
+Then update `CalcObjectState` conceptually to:
+
+```rust
+pub struct CalcObjectState {
+    pub object_key: String,
+    pub object_type: CalcObjectType,
+
+    pub dim_columns: ColumnStore<String>,
+    pub row_count: usize,
+
+    pub number_columns: ColumnStore<f64>,
+    pub string_columns: ColumnStore<String>,
+    pub connected_dim_columns: ColumnStore<String>,
+
+    pub node_ids: HashSet<i64>,
+}
+```
+
+If changing `dim_columns` is too invasive initially, start with:
+
+```text
+number_columns
+string_columns
+connected_dim_columns
+```
+
+and keep `dim_columns` unchanged for compatibility.
+
+---
+
+## Recommended Incremental Approach
+
+### Phase 1: Add `ColumnStore<T>`
+
+Add a generic helper type:
+
+```rust
+ColumnStore<T>
+```
+
+with:
+
+```text
+insert
+get
+contains
+iter
+len
+is_empty
+```
+
+Preserve stable insertion order.
+
+---
+
+### Phase 2: Convert Number/String/Connected Columns
+
+Start with:
+
+```text
+number_columns
+string_columns
+connected_dim_columns
+```
+
+because these are loaded dynamically and are most important for calculation/merge.
+
+---
+
+### Phase 3: Keep Compatibility Helpers
+
+Keep helper methods on `CalcObjectState`:
+
+```rust
+get_number_column(...)
+get_string_column(...)
+get_connected_dim_column(...)
+add_number_column(...)
+add_string_column(...)
+add_connected_dim_column(...)
+```
+
+but make them use `ColumnStore` internally.
+
+---
+
+### Phase 4: Update RecordBatch Builder
+
+Update:
+
+```text
+modelAPI/omni-calc/src/engine/exec/context.rs
+```
+
+`build_record_batch(state)` should iterate in stable column order:
+
+```rust
+for (col_name, values) in state.number_columns.iter() {
+    ...
+}
+```
+
+---
+
+### Phase 5: Update Merge Logic From Issue 1
+
+When `NodeOutput` is merged:
+
+```rust
+if !state.number_columns.contains(&col_name) {
+    state.number_columns.insert(col_name, values);
+}
+```
+
+This avoids `O(n)` scans during merge.
+
+---
+
+## Expected Impact
+
+Expected improvements:
+
+```text
+1. Faster column lookup for formula evaluation.
+2. Faster duplicate detection during merge.
+3. Faster state mutation during node output merge.
+4. Faster resolver and RecordBatch preparation.
+5. Better scalability for wide models.
+6. Lower coordinator bottleneck in future parallel scheduler.
+```
+
+Practical expected benefit:
+
+```text
+Small models: low impact
+Wide models: medium to high impact
+Parallel-ready executor: important to prevent merge bottleneck
+```
+
+---
+
+## Risks / Edge Cases
+
+```text
+1. Must preserve output column order.
+2. Must not change RecordBatch schema ordering unexpectedly.
+3. Duplicate column behavior must remain compatible.
+4. Existing code expects Vec<(String, Vec<T>)>; refactor may touch many call sites.
+5. Generic ColumnStore must not overcomplicate borrow/lifetime handling.
+6. Tests must prove serial output parity.
+```
+
+---
+
+## Dependencies
+
+Recommended after or alongside:
+
+```text
+Issue 1 - Core Kahn-style scheduler foundation
+```
+
+This issue can be implemented independently, but it becomes more valuable once `NodeOutput` merge is added.
+
+---
+
+## Acceptance Criteria
+
+```text
+1. `CalcObjectState` has indexed lookup for dynamic columns.
+2. Number column lookup is no longer linear.
+3. String column lookup is no longer linear.
+4. Connected dimension column lookup is no longer linear.
+5. Insertion order is preserved.
+6. Duplicate column insertion is prevented in O(1) average time.
+7. `build_record_batch` output schema order remains deterministic.
+8. Existing tests pass.
+9. New tests cover lookup, insertion, duplicate insert, and iteration order.
+10. Serial executor output matches current behavior.
+```
+
+---
+
+## Testing Notes
+
+Add tests for:
+
+```text
+ColumnStore insert/get
+ColumnStore duplicate insert
+ColumnStore stable order
+CalcObjectState get_number_column
+CalcObjectState get_string_column
+CalcObjectState get_connected_dim_column
+RecordBatch schema order
+merge NodeOutput duplicate prevention
+large synthetic column lookup benchmark
+```
+
+---
+
+## Out of Scope
+
+```text
+Changing output schema
+Changing calculation semantics
+Parallel execution
+Changing Python DAG manager behavior
+Replacing all string column names with numeric IDs
+Changing join key strategy
+```
+
+---
+
+## Priority
+
+Medium / High
+
+---
+
+## Labels
+
+```text
+omni-calc
+rust
+performance
+data-structure
+column-store
+calc-object-state
+executor
+merge-optimization
+```
+
+---
+
+## Components
+
+```text
+Omni-Calc
+Rust Engine
+Execution State
+Calculation Executor
+RecordBatch Materialization
+```
+
+---
+
+# ISSUE 8
+
+## Issue Type
+
+Performance / Memory Optimization / Refactor
+
+---
+
+## Title
+
+Reduce Cloning by Reusing Preloaded Data and Shared Column References in Omni-Calc Execution
+
+---
+
+## Summary
+
+Reduce unnecessary cloning of large vectors, preloaded metadata, formula input columns, resolver data, and Arrow output data by introducing shared references or `Arc`-backed column storage where safe.
+
+The branch already moves metadata into Rust-side `PreloadedMetadata`, but some execution paths still clone large vectors or rebuild structures repeatedly. This issue should make better use of preloaded Rust-owned data and reduce clone-heavy execution paths.
+
+Goal:
+
+```text
+Use preloaded data once.
+Share references where possible.
+Avoid Python callbacks after preload.
+Avoid cloning large columns unless ownership is truly required.
+```
+
+---
+
+## Relevant Code Areas
+
+Primary files:
+
+```text
+modelAPI/omni-calc/src/engine/exec/context.rs
+modelAPI/omni-calc/src/engine/exec/preload.rs
+modelAPI/omni-calc/src/engine/exec/get_source_data/dim_loader.rs
+modelAPI/omni-calc/src/engine/exec/formula_eval.rs
+modelAPI/omni-calc/src/engine/exec/get_source_data/resolver.rs
+modelAPI/omni-calc/src/engine/exec/steps/calculation.rs
+modelAPI/omni-calc/src/engine/exec/steps/input_handler/mod.rs
+modelAPI/omni-calc/src/python.rs
+```
+
+Important current patterns:
+
+### `ExecutionContext::new`
+
+Current behavior clones plan maps into resolver:
+
+```rust
+let resolver = CrossObjectResolver::new(
+    plan.request.node_maps.clone(),
+    plan.request.variable_filters.clone(),
+);
+```
+
+### `build_record_batch`
+
+Current behavior clones column vectors into Arrow arrays:
+
+```rust
+StringArray::from(values.clone())
+Float64Array::from(values.clone())
+```
+
+### `build_execution_result`
+
+Current behavior clones warnings into result:
+
+```rust
+for warning in &ctx.warnings {
+    result.add_warning(warning.clone());
+}
+```
+
+### `FormulaEvaluator`
+
+Current evaluator owns columns:
+
+```rust
+columns: HashMap<String, Vec<f64>>
+dim_string_columns: HashMap<String, Vec<String>>
+time_values: Vec<String>
+```
+
+and setup paths clone dimension/time columns.
+
+### `PreloadedMetadata`
+
+Current branch has Rust-owned preloaded data:
+
+```rust
+pub struct PreloadedMetadata {
+    pub dimension_items: HashMap<i64, Vec<DimensionItem>>,
+    pub property_maps: HashMap<(i64, i64, i64), HashMap<i64, String>>,
+}
+```
+
+---
+
+## Current Behavior
+
+The branch already preloads metadata from Python before execution:
+
+```rust
+let preloaded =
+    crate::engine::exec::preload::preload_metadata(py, metadata_cache.as_ref(), &plan.inner)
+        .map_err(pyo3::exceptions::PyRuntimeError::new_err)?;
+
+engine.set_preloaded_metadata(preloaded);
+
+let result = py
+    .allow_threads(|| runtime::execute(&mut engine, plan.inner.clone()))
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+```
+
+This is good because Rust execution runs after preload and outside the GIL.
+
+However, within Rust execution, there are still clone-heavy areas:
+
+```text
+1. Plan maps cloned into resolver.
+2. Column vectors cloned into Arrow arrays.
+3. Formula evaluator owns and clones column vectors.
+4. Dimension/time string columns are cloned into evaluator context.
+5. Property maps may be rebuilt or copied instead of shared.
+6. Resolver may repeatedly rebuild RecordBatches from cloned state.
+```
+
+---
+
+## Problem Statement
+
+Large Omni-Calc models can have:
+
+```text
+many blocks
+many rows per block
+many indicators
+many property columns
+many connected dimension columns
+many cross-object joins
+large preloaded metadata maps
+```
+
+In this case, cloning large `Vec<f64>` and `Vec<String>` values can become expensive.
+
+Main costs:
+
+```text
+CPU cost of copying large vectors
+memory allocation pressure
+higher peak memory usage
+slower resolver updates
+slower final materialization
+slower formula evaluator setup
+less benefit from future parallelism due to memory bandwidth pressure
+```
+
+Even if Rayon parallelism is added, clone-heavy execution may become memory-bound.
+
+---
+
+## Preloaded Data Requirement
+
+This issue must reinforce the rule:
+
+```text
+After preload, Rust execution hot path should use `PreloadedMetadata` and should not call Python/PyO3.
+```
+
+Allowed PyO3 usage:
+
+```text
+Python boundary
+CalcPlan extraction
+metadata preload before execution
+returning result to Python
+```
+
+Not allowed in execution hot path:
+
+```text
+metadata_cache.call_method1(...)
+Python<'_>
+PyObject-based property loading
+lazy Python callback from worker/node execution
+```
+
+If metadata is missing from preload, execution should fail early in preloaded-only mode.
+
+---
+
+## Proposed Change
+
+### 1. Introduce Shared Column Types
+
+Introduce shared immutable column aliases:
+
+```rust
+type NumberColumn = Arc<[f64]>;
+type StringColumn = Arc<[String]>;
+```
+
+or:
+
+```rust
+type NumberColumn = Arc<Vec<f64>>;
+type StringColumn = Arc<Vec<String>>;
+```
+
+Recommended long-term:
+
+```rust
+Arc<[T]>
+```
+
+because it expresses immutable shared slices.
+
+Example:
+
+```rust
+struct SharedColumnStore<T> {
+    columns: Vec<(String, Arc<[T]>)>,
+    index: HashMap<String, usize>,
+}
+```
+
+This combines Issue 7 and Issue 8 well:
+
+```text
+Issue 7 = faster lookup/indexing
+Issue 8 = avoid cloning values
+```
+
+---
+
+### 2. Use Borrowed or Shared Columns in `ExecutionSnapshot`
+
+Future `ExecutionSnapshot` from Issue 1 should avoid cloning columns.
+
+Instead of:
+
+```rust
+number_columns: Vec<(String, Vec<f64>)>
+```
+
+prefer:
+
+```rust
+number_columns: Arc<ColumnStore<f64>>
+```
+
+or:
+
+```rust
+number_columns: Vec<(String, Arc<[f64]>)>
+```
+
+Snapshot should be cheap to clone:
+
+```rust
+#[derive(Clone)]
+struct ExecutionSnapshot {
+    block_key: String,
+    number_columns: Arc<ColumnStore<f64>>,
+    string_columns: Arc<ColumnStore<String>>,
+    connected_dim_columns: Arc<ColumnStore<String>>,
+    preloaded_metadata: Arc<PreloadedMetadata>,
+}
+```
+
+---
+
+### 3. Avoid Cloning Preloaded Metadata
+
+`PreloadedMetadata` should be stored and passed as:
+
+```rust
+Arc<PreloadedMetadata>
+```
+
+or referenced immutably for the full execution lifetime.
+
+Avoid copying maps like:
+
+```rust
+HashMap<i64, Vec<DimensionItem>>
+HashMap<(i64, i64, i64), HashMap<i64, String>>
+```
+
+Use shared references to read property maps.
+
+---
+
+### 4. Convert Property Caches to Read-Only Shared Snapshots
+
+Current `ExecutionContext` has mutable caches:
+
+```rust
+pub string_property_map_cache: HashMap<(i64, i64, i64), StringPropertyMap>,
+pub numeric_property_map_cache: HashMap<(i64, i64, i64), (PropertyMap, Vec<String>)>,
+```
+
+For future parallelism, prefer a prebuilt immutable cache:
+
+```rust
+struct PropertyCacheSnapshot {
+    string_maps: HashMap<(i64, i64, i64), Arc<StringPropertyMap>>,
+    numeric_maps: HashMap<(i64, i64, i64), Arc<(PropertyMap, Vec<String>)>>,
+}
+```
+
+Then property node execution reads:
+
+```rust
+property_cache.string_maps.get(&key)
+property_cache.numeric_maps.get(&key)
+```
+
+without rebuilding or locking.
+
+---
+
+### 5. Reduce FormulaEvaluator Column Clones
+
+Current evaluator owns:
+
+```rust
+HashMap<String, Vec<f64>>
+HashMap<String, Vec<String>>
+```
+
+This requires moving/cloning vectors into the evaluator.
+
+Consider an evaluator context based on borrowed/shared references:
+
+```rust
+struct EvalContext<'a> {
+    columns: HashMap<String, &'a [f64]>,
+    dim_string_columns: HashMap<String, &'a [String]>,
+}
+```
+
+or shared refs:
+
+```rust
+struct EvalContext {
+    columns: HashMap<String, Arc<[f64]>>,
+    dim_string_columns: HashMap<String, Arc<[String]>>,
+}
+```
+
+Recommended practical approach:
+
+```text
+Use Arc-backed columns first.
+Avoid lifetime-heavy borrowed evaluator until architecture is stable.
+```
+
+This makes evaluator snapshots `Send + Sync` friendly for future Rayon work.
+
+---
+
+### 6. Reduce Resolver Rebuild Clones
+
+`ctx.update_resolver(&block_key)` currently rebuilds a `RecordBatch` from current state.
+
+This internally calls:
+
+```rust
+build_record_batch(state)
+```
+
+which clones all column vectors into Arrow arrays.
+
+From Issue 1, resolver updates should be moved to dependency-safe boundaries.
+
+For this issue, also evaluate whether resolver can store a lighter read-only block snapshot instead of repeatedly storing cloned Arrow data.
+
+Possible intermediate design:
+
+```rust
+struct BlockSnapshot {
+    dim_columns: Arc<ColumnStore<String>>,
+    connected_dim_columns: Arc<ColumnStore<String>>,
+    string_columns: Arc<ColumnStore<String>>,
+    number_columns: Arc<ColumnStore<f64>>,
+}
+```
+
+Then only materialize Arrow when required.
+
+---
+
+### 7. Avoid Re-Cloning Plan Maps into Resolver
+
+Current initialization clones:
+
+```rust
+plan.request.node_maps.clone()
+plan.request.variable_filters.clone()
+```
+
+If these are immutable during execution, use references or `Arc`:
+
+```rust
+CrossObjectResolver::new(
+    Arc::new(plan.request.node_maps.clone()),
+    Arc::new(plan.request.variable_filters.clone()),
+)
+```
+
+Better long-term:
+
+```rust
+CrossObjectResolver<'a> {
+    node_maps: &'a [PlannedNodeMap],
+    variable_filters: &'a HashMap<String, VariableFilter>,
+}
+```
+
+or:
+
+```rust
+CrossObjectResolver {
+    node_maps: Arc<[PlannedNodeMap]>,
+    variable_filters: Arc<HashMap<String, VariableFilter>>,
+}
+```
+
+Choice depends on lifetime complexity.
+
+For parallel-ready snapshots, `Arc` may be easier.
+
+---
+
+## Recommended Implementation Approach
+
+### Phase 1: Identify and Benchmark Clone Hotspots
+
+Add tracing/benchmarks around:
+
+```text
+ExecutionContext::new
+build_record_batch
+ctx.update_resolver
+build_execution_result
+formula evaluator setup
+property map loading
+cross-object resolver path
+```
+
+Track:
+
+```text
+number of rows
+number of columns
+number of clones/materializations
+elapsed time
+peak memory if available
+```
+
+---
+
+### Phase 2: Introduce Shared Column Types
+
+Add:
+
+```rust
+type SharedNumberColumn = Arc<[f64]>;
+type SharedStringColumn = Arc<[String]>;
+```
+
+Start with internal conversion in new structures.
+
+---
+
+### Phase 3: Combine With Issue 7 ColumnStore
+
+Use:
+
+```rust
+ColumnStore<T>
+```
+
+or:
+
+```rust
+SharedColumnStore<T>
+```
+
+to get both:
+
+```text
+fast lookup
+less cloning
+stable ordering
+```
+
+---
+
+### Phase 4: Convert Property Cache to Immutable Snapshot
+
+Build property cache once from `PreloadedMetadata`.
+
+Then read it immutably during execution.
+
+No Python callback.
+
+No mutable cache lock.
+
+No repeated map rebuild.
+
+---
+
+### Phase 5: Make Evaluator Use Shared Columns
+
+Move evaluator toward:
+
+```rust
+HashMap<String, Arc<[f64]>>
+```
+
+instead of:
+
+```rust
+HashMap<String, Vec<f64>>
+```
+
+Where formula functions require owned `Vec<f64>` output, only allocate for actual computed results, not for input columns.
+
+---
+
+### Phase 6: Reduce Resolver Materialization
+
+Avoid rebuilding full `RecordBatch` after every node.
+
+Prefer:
+
+```text
+shared block snapshot for resolver reads
+Arrow RecordBatch only when needed
+```
+
+This should align with Issue 1 resolver boundary work.
+
+---
+
+## Expected Impact
+
+Expected performance improvements:
+
+```text
+1. Lower memory usage.
+2. Lower CPU spent copying vectors.
+3. Faster formula setup.
+4. Faster resolver updates.
+5. Faster final materialization.
+6. Better scalability for large/wide models.
+7. Better performance from future Rayon parallelism because memory bandwidth is less saturated.
+```
+
+Practical expectation:
+
+```text
+Small models: small improvement
+Large row-count models: medium/high improvement
+Wide models: high improvement
+Cross-object-heavy models: high improvement when combined with resolver/join changes
+```
+
+---
+
+## Risks / Edge Cases
+
+```text
+1. `Arc<[T]>` makes columns immutable; mutation flow must append new columns instead of mutating existing ones.
+2. Some formula functions may expect owned `Vec<f64>` and need careful adaptation.
+3. Borrowed lifetimes may complicate evaluator design; prefer Arc first.
+4. Arrow arrays may still need conversion/copy depending on input type.
+5. Changing ownership model can create compile-time lifetime complexity.
+6. Must preserve exact calculation semantics.
+7. Must preserve output ordering.
+8. Must preserve warning behavior.
+9. Must ensure all shared data is Send + Sync before Rayon execution.
+```
+
+---
+
+## Dependencies
+
+Recommended dependencies:
+
+```text
+Issue 1 - Core Kahn-style scheduler foundation
+Issue 7 - ColumnStore / faster column lookup
+```
+
+This issue can start independently with clone hotspot benchmarks.
+
+---
+
+## Acceptance Criteria
+
+```text
+1. Major clone-heavy paths are identified and documented.
+2. Preloaded metadata is reused by reference or Arc, not cloned repeatedly.
+3. Property maps are built from PreloadedMetadata, not Python callbacks.
+4. Worker-ready execution paths do not require PyO3.
+5. Formula evaluator input columns can be shared or borrowed where safe.
+6. Resolver update/materialization avoids unnecessary full data cloning where possible.
+7. RecordBatch materialization remains correct.
+8. Output schema and ordering remain unchanged.
+9. Serial executor output matches current behavior.
+10. Memory usage and runtime are benchmarked before/after.
+```
+
+---
+
+## Testing Notes
+
+Add tests for:
+
+```text
+shared column lookup
+shared column merge
+formula evaluation using shared columns
+property cache built from PreloadedMetadata
+missing preloaded metadata failure
+no Python callback in execution hot path
+RecordBatch output parity
+resolver output parity
+serial vs optimized output parity
+large column memory benchmark
+```
+
+---
+
+## Out of Scope
+
+```text
+Changing calculation semantics
+Changing output schema
+Changing Python DAG manager behavior
+Removing PyO3 boundary layer
+Parallel execution itself
+Replacing join string keys
+Full Arrow zero-copy rewrite
+```
+
+---
+
+## Priority
+
+High
+
+---
+
+## Labels
+
+```text
+omni-calc
+rust
+performance
+clone-reduction
+memory-optimization
+preloaded-data
+python-callback-removal
+arc
+shared-columns
+formula-evaluator
+resolver
+```
+
+---
+
+## Components
+
+```text
+Omni-Calc
+Rust Engine
+Execution Context
+Preload
+Formula Evaluation
+Cross-Object Resolver
+RecordBatch Materialization
+Python Boundary
+```
+
+---
+
+# Coverage Check: Do Issues 1-9 Cover Preloaded Data and Python Callback Removal?
+
+## Short Answer
+
+Yes, the full issue set from Issue 1 to Issue 9 covers this.
+
+The intended rule is:
+
+```text
+Use PyO3 only at the Python boundary and preload stage.
+Do not call Python/PyO3 from the Rust execution hot path after preload.
+Use PreloadedMetadata and immutable Rust-owned snapshots during execution.
+```
+
+---
+
+## Where It Is Covered
+
+### Issue 1
+
+Covers:
+
+```text
+Remove/isolate Python callback paths from Rust hot path
+Preloaded-only worker-ready execution
+No Python callbacks during node execution
+Fail early if required preloaded metadata is missing
+```
+
+### Issue 2
+
+Covers:
+
+```text
+Parallel workers must not call Python
+Parallel workers must use immutable snapshots
+Parallel property/input/calculation execution must use preloaded Rust data
+```
+
+### Issue 7
+
+Covers:
+
+```text
+Better state structure for faster access to already-loaded data
+Faster merge and lookup without repeated scans
+Improves use of Rust-owned execution state
+```
+
+### Issue 8
+
+Covers:
+
+```text
+Reuse preloaded data by reference or Arc
+Avoid cloning preloaded maps and large column vectors
+Use shared column references in snapshots/evaluators/resolver
+Avoid Python fallback in optimized execution paths
+```
+
+### Issue 9
+
+Covers separately:
+
+```text
+Avoid repeated String allocation/cloning for join keys
+Improve cross-object join key representation
+Make better use of IDs / encoded keys instead of repeated string paths
+```
+
+---
+
+## Final Recommended Rule To Add Across Issues
+
+Add this sentence to all implementation tickets touching execution:
+
+```text
+All execution-hot-path logic must use Rust-owned preloaded data and must not perform PyO3/Python metadata callbacks. PyO3 is allowed only at the external Python binding boundary and during the explicit preload phase before Rust execution starts.
+```
+
+---
+
+# Final Notes
+
+The first 6 issues cover the parallelization strategy.
+
+Issue 7 and Issue 8 add the missing performance foundation around:
+
+```text
+better data structures
+faster column lookup
+less cloning
+better reuse of preloaded data
+no Python callbacks in execution
+lower memory pressure
+```
+
+Together, Issues 1-9 give a stronger optimization plan:
+
+```text
+Issues 1-6:
+    safe parallelism
+
+Issue 7:
+    faster state and column lookup
+
+Issue 8:
+    less cloning and better shared data reuse
+
+Issue 9:
+    faster join keys and less string allocation
+```
