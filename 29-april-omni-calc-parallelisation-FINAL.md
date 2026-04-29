@@ -4081,3 +4081,759 @@ Issue 8:
 Issue 9:
     faster join keys and less string allocation
 ```
+
+
+# Epic: Performance, Preloading, Data Structure, and Parallel Execution Improvements for Rust `omni-calc`
+
+## Summary
+
+This epic covers additional performance and architecture improvements for the Rust `omni-calc` executor after the initial executor refactor work.
+
+The goal is to improve:
+
+- Better use of `PreloadedMetadata`
+- Safer future Rayon-based parallel execution
+- Reduced Python callback dependency
+- Faster snapshot creation
+- Lower memory cloning overhead
+- Faster resolver refresh behavior
+- Better data structures for hot execution paths
+- Improved dependency validation before parallel execution
+- Benchmarking and profiling coverage
+
+These issues should be treated as follow-up tickets after the initial Issues 1–9 executor refactor work.
+
+The main direction is:
+
+```text
+Python = plan creation and metadata preparation
+Rust = execution, dependency tracking, snapshots, scheduling, and merge
+Workers = read immutable snapshots only
+Merge phase = only place where shared state is mutated
+```
+
+Python callbacks should not be introduced inside worker-style execution paths.
+
+---
+
+# Issue 10: Expand and Normalize `PreloadedMetadata` for Worker-Safe Execution
+
+## Summary
+
+Improve `PreloadedMetadata` so Rust execution workers can read all required metadata from Rust-owned immutable structures without needing Python callbacks, lazy loading, or shared mutable metadata caches during calculation.
+
+## Problem
+
+For future Rayon-based parallel execution, worker threads should not depend on:
+
+- Python callbacks
+- GIL-bound metadata access
+- Shared mutable metadata caches
+- Runtime lazy metadata resolution
+- Blocking metadata fetches during node execution
+
+If metadata is incomplete during execution, parallel execution can become blocked, non-deterministic, or slower than serial execution.
+
+## Proposed Direction
+
+Refactor and expand `PreloadedMetadata` to include all metadata required by:
+
+- Input step execution
+- Calculation step execution
+- Property step execution
+- Cross-object resolution
+- Variable filters
+- Dimension lookups
+- Property map lookups
+- Formula dependency handling
+- Source block / connected block resolution
+
+The metadata should be loaded before execution starts and shared through immutable structures.
+
+Example direction:
+
+```rust
+struct PreloadedMetadata {
+    blocks: Arc<HashMap<BlockId, BlockMetadata>>,
+    indicators: Arc<HashMap<IndicatorId, IndicatorMetadata>>,
+    dimensions: Arc<HashMap<DimensionId, DimensionMetadata>>,
+    properties: Arc<HashMap<PropertyId, PropertyMetadata>>,
+    variable_filters: Arc<HashMap<FilterId, VariableFilterMetadata>>,
+    property_maps: Arc<PropertyMapStore>,
+}
+```
+
+Execution workers should receive metadata through `ExecutionSnapshot`.
+
+```rust
+struct ExecutionSnapshot {
+    block_id: BlockId,
+    preloaded_metadata: Arc<PreloadedMetadata>,
+    resolver_snapshot: Arc<CrossObjectResolverSnapshot>,
+}
+```
+
+## Acceptance Criteria
+
+- Required execution metadata is available before node execution starts.
+- Worker-style execution paths do not call back into Python.
+- Metadata is stored in immutable, shareable Rust structures such as `Arc`.
+- Existing metadata caches are removed from hot paths where possible.
+- Missing metadata produces a clear validation error before execution starts.
+- Tests verify that execution works using only preloaded metadata.
+- No new Python callback is introduced inside the Rust node execution path.
+
+---
+
+# Issue 11: Introduce Snapshot-Friendly Column Storage Using Shared `Arc` Data
+
+## Summary
+
+Refactor execution column storage so snapshots can cheaply share existing block data without repeatedly cloning full vectors of dimension, string, number, and connected dimension columns.
+
+## Problem
+
+The future execution model depends on building read-only snapshots for each node.
+
+If each snapshot deep-clones all column data, then parallel execution may become memory-heavy and slower than the current serial execution.
+
+Current column structures such as:
+
+```rust
+Vec<(String, Vec<f64>)>
+Vec<(String, Vec<String>)>
+```
+
+can cause unnecessary cloning when used across multiple snapshots.
+
+## Proposed Direction
+
+Introduce shared column storage using immutable `Arc`-backed data.
+
+Example concept:
+
+```rust
+struct ColumnStore {
+    dim_columns: HashMap<ColumnId, Arc<Vec<String>>>,
+    number_columns: HashMap<ColumnId, Arc<Vec<f64>>>,
+    string_columns: HashMap<ColumnId, Arc<Vec<String>>>,
+    connected_dim_columns: HashMap<ColumnId, Arc<Vec<String>>>,
+}
+```
+
+Snapshots should reference existing column data instead of cloning it:
+
+```rust
+struct ExecutionSnapshot {
+    block_id: BlockId,
+    columns: Arc<ColumnStore>,
+}
+```
+
+Newly calculated outputs should still be owned by `NodeOutput` until they are merged.
+
+```rust
+struct NodeOutput {
+    block_id: BlockId,
+    number_columns: Vec<(ColumnId, Vec<f64>)>,
+    string_columns: Vec<(ColumnId, Vec<String>)>,
+    connected_dim_columns: Vec<(ColumnId, Vec<String>)>,
+}
+```
+
+## Acceptance Criteria
+
+- Execution snapshots do not deep-clone large column vectors unnecessarily.
+- Existing calculated columns are shared using immutable `Arc` data.
+- Newly calculated node outputs remain separately owned until merge.
+- Snapshot creation becomes cheaper for large execution plans.
+- Existing calculation behavior remains unchanged.
+- Tests cover snapshot creation with shared column data.
+- Benchmarks or profiling verify reduced snapshot creation overhead.
+
+---
+
+# Issue 12: Add Rayon-Based Ready-Layer Parallel Execution Behind a Feature Flag
+
+## Summary
+
+Add an experimental Rayon-based execution path that parallelizes only safe ready nodes after the single-threaded Kahn-style scheduler has been introduced and validated.
+
+## Problem
+
+The executor currently runs serially.
+
+Even after graph-driven scheduling is introduced, execution will remain single-threaded unless ready nodes are executed concurrently.
+
+However, parallelization should not be added blindly to all nodes because some nodes may depend on:
+
+- Sequential execution semantics
+- Resolver update timing
+- Cross-object references
+- Python-backed metadata
+- Shared mutable state
+- Overlapping output columns
+
+## Proposed Direction
+
+Add a feature-gated or config-gated parallel execution mode.
+
+Example:
+
+```rust
+let outputs: Vec<NodeOutput> = ready_nodes
+    .into_par_iter()
+    .map(|node| {
+        let snapshot = build_snapshot_readonly(&ctx, &node);
+        execute_node(snapshot, node)
+    })
+    .collect();
+
+merge_node_outputs(&mut ctx, outputs);
+```
+
+Only nodes marked as parallel-safe should be included.
+
+```rust
+struct ExecNode {
+    id: NodeId,
+    block_id: BlockId,
+    deps: Vec<NodeId>,
+    outputs: Vec<ColumnId>,
+    parallel_safe: bool,
+}
+```
+
+## Safe Initial Candidates
+
+Parallelization can initially be allowed for:
+
+- Independent input indicator nodes
+- Calculation nodes whose dependencies are complete
+- Property nodes that only read preloaded metadata
+- Nodes that produce distinct output columns
+- Nodes that do not require immediate resolver mutation
+
+## Do Not Parallelize Initially
+
+Do not parallelize these node types initially:
+
+- Sequential groups
+- Nodes requiring unresolved cross-object references
+- Nodes requiring Python callbacks
+- Nodes depending on immediate mutable resolver updates
+- Nodes writing to overlapping output columns
+- Nodes with unclear dependency boundaries
+
+## Acceptance Criteria
+
+- Parallel execution is behind a feature flag or config option.
+- Default execution remains serial unless parallel mode is explicitly enabled.
+- Rayon is used only for ready nodes marked as parallel-safe.
+- Sequential groups continue to execute atomically.
+- Output ordering remains deterministic where required.
+- Serial and parallel execution outputs are tested for equality.
+- Tests verify unsafe nodes are excluded from Rayon execution.
+- Benchmarks show speedup on eligible workloads.
+
+---
+
+# Issue 13: Replace Hot-Path String Lookups with Interned IDs
+
+## Summary
+
+Reduce hot-path overhead by replacing repeated string-based block, node, indicator, and column lookups with compact internal IDs.
+
+## Problem
+
+The executor currently relies heavily on string identifiers such as:
+
+```text
+block39951
+ind259068
+block39951___ind259068
+```
+
+Repeated string parsing, cloning, hashing, and comparison can become expensive during:
+
+- Graph construction
+- Dependency checks
+- Resolver lookups
+- Snapshot creation
+- Node execution
+- Output merge
+- Warning generation
+
+## Proposed Direction
+
+Introduce interned IDs for hot-path execution.
+
+Example:
+
+```rust
+struct BlockId(usize);
+struct NodeId(usize);
+struct ColumnId(usize);
+struct IndicatorId(usize);
+struct PropertyId(usize);
+```
+
+Maintain a registry that maps external string names to internal IDs.
+
+```rust
+struct IdRegistry {
+    block_ids: HashMap<String, BlockId>,
+    node_ids: HashMap<String, NodeId>,
+    column_ids: HashMap<String, ColumnId>,
+    indicator_ids: HashMap<String, IndicatorId>,
+
+    block_names: Vec<String>,
+    node_names: Vec<String>,
+    column_names: Vec<String>,
+    indicator_names: Vec<String>,
+}
+```
+
+Use compact IDs internally while preserving original string names for:
+
+- API compatibility
+- Output format
+- Debug logs
+- Error messages
+- Warnings
+
+## Acceptance Criteria
+
+- Hot-path graph and dependency logic uses internal IDs instead of raw strings.
+- Public output format remains unchanged.
+- String-to-ID conversion happens once during plan preparation.
+- Existing warnings and error messages still include readable names.
+- Tests verify ID mapping correctness.
+- Tests verify original external names are preserved in final output.
+- Benchmarks show reduced overhead in graph build and execution paths.
+
+---
+
+# Issue 14: Add Dependency-Aware Resolver Snapshot Refresh
+
+## Summary
+
+Optimize `CrossObjectResolver` updates by refreshing resolver snapshots only when downstream dependencies require updated source block data.
+
+## Problem
+
+Currently, resolver updates may rebuild a full `RecordBatch` after individual node execution.
+
+This can cause repeated expensive work.
+
+Current behavior can look like:
+
+```text
+node 1 -> rebuild source block RecordBatch
+node 2 -> rebuild source block RecordBatch
+node 3 -> rebuild source block RecordBatch
+```
+
+For large blocks, repeated Arrow array construction and cloning can be costly.
+
+## Proposed Direction
+
+Track which downstream nodes require resolver-visible data from each source block.
+
+Only refresh resolver state when:
+
+- A source block has completed the required columns for downstream references
+- A dependency boundary is reached
+- A ready batch/layer has finished
+- A downstream node is about to read cross-object data
+- Resolver-visible data has actually changed
+
+Example concept:
+
+```rust
+struct ResolverRefreshPlan {
+    required_by_block: HashMap<BlockId, Vec<CrossObjectDependency>>,
+    dirty_blocks: HashSet<BlockId>,
+}
+```
+
+Resolver updates should happen in a controlled merge phase, not inside each node execution.
+
+## Acceptance Criteria
+
+- Resolver refresh is not blindly triggered after every node output.
+- Resolver update decisions are dependency-aware.
+- Cross-object references still resolve correctly.
+- Serial behavior remains unchanged.
+- Resolver is updated before downstream nodes that need source data are released.
+- Tests cover same-block dependencies.
+- Tests cover cross-block dependencies.
+- Tests cover resolver refresh timing.
+- Tests cover missing source data errors.
+- Performance improves for plans with multiple outputs from the same source block.
+
+---
+
+# Issue 15: Batch `NodeOutput` Merge Operations
+
+## Summary
+
+Improve merge performance by batching multiple `NodeOutput` values before mutating `ExecutionContext`.
+
+## Problem
+
+In a future parallel ready-layer execution model, multiple nodes may finish together and produce multiple `NodeOutput` values.
+
+Merging each output one by one can cause repeated:
+
+- Block state lookups
+- Column existence checks
+- Resolver refresh checks
+- Warning extensions
+- Stats updates
+- Mutable state operations
+
+## Proposed Direction
+
+Introduce a batched merge function.
+
+Example:
+
+```rust
+fn merge_node_outputs(ctx: &mut ExecutionContext, outputs: Vec<NodeOutput>) {
+    // group outputs by block_id
+    // append columns in batch
+    // collect warnings
+    // update nodes_calculated
+    // refresh resolver once per affected block when required
+}
+```
+
+Group outputs by:
+
+- `block_id`
+- affected output columns
+- resolver update requirement
+- warning collection
+- calculated node count
+
+Example internal grouping:
+
+```rust
+struct BlockOutputBatch {
+    block_id: BlockId,
+    number_columns: Vec<(ColumnId, Vec<f64>)>,
+    string_columns: Vec<(ColumnId, Vec<String>)>,
+    connected_dim_columns: Vec<(ColumnId, Vec<String>)>,
+    should_update_resolver: bool,
+}
+```
+
+## Acceptance Criteria
+
+- Multiple `NodeOutput` values can be merged in one controlled mutation phase.
+- Outputs are grouped by block before merge.
+- Warnings and stats are accumulated once per batch.
+- Resolver refresh happens at most once per affected block per merge batch.
+- Existing serial behavior remains unchanged.
+- Tests cover multiple outputs for the same block.
+- Tests cover multiple outputs for different blocks.
+- Tests cover duplicate column prevention.
+- Tests cover resolver update behavior during batch merge.
+
+---
+
+# Issue 16: Add Execution Profiling and Benchmarks for Scheduler, Snapshot, Merge, and Resolver
+
+## Summary
+
+Add benchmark and profiling coverage for the new execution architecture to measure real performance gains and identify bottlenecks.
+
+## Problem
+
+Executor refactors around snapshots, preloading, graph scheduling, resolver updates, Arrow `RecordBatch` construction, and Rayon parallelism need measurable validation.
+
+Without benchmarks, it is difficult to know whether changes actually improve performance or only improve architecture.
+
+## Proposed Direction
+
+Add benchmarks for:
+
+- Graph construction
+- Formula dependency extraction
+- Metadata preload
+- Snapshot creation
+- Node execution
+- `NodeOutput` merge
+- Batched merge
+- Resolver update
+- Arrow `RecordBatch` construction
+- Serial Kahn scheduler
+- Parallel ready-layer execution
+- Large block execution
+- Cross-object dependency-heavy execution
+- Property-heavy execution
+- Sequential group execution
+
+Suggested benchmark categories:
+
+```text
+Small plan:
+  low number of blocks and indicators
+
+Medium plan:
+  multiple blocks, formulas, properties, and filters
+
+Large plan:
+  large column vectors and many calculation nodes
+
+Cross-object plan:
+  many source block references
+
+Property-heavy plan:
+  many metadata/property lookups
+```
+
+## Acceptance Criteria
+
+- Benchmark cases exist for small, medium, and large plans.
+- Resolver rebuild cost is measured separately.
+- Snapshot creation cost is measured separately.
+- Serial vs parallel execution can be compared.
+- Metadata preload cost is measured separately.
+- Arrow `RecordBatch` construction cost is measured separately.
+- Benchmarks can be run locally by developers.
+- Results help identify remaining hot paths.
+- Documentation explains how to run the benchmarks.
+
+---
+
+# Issue 17: Add Pre-Execution Validation for Parallel-Safety
+
+## Summary
+
+Add a validation pass that checks whether each execution node is safe for future parallel execution.
+
+## Problem
+
+Not every node should be parallelized.
+
+Some nodes may depend on:
+
+- Sequential semantics
+- Mutable resolver state
+- Cross-object data availability
+- Python-backed metadata access
+- Overlapping output columns
+- Missing dependency information
+- Shared mutable caches
+
+Without validation, parallel execution may produce incorrect or non-deterministic results.
+
+## Proposed Direction
+
+Add a pre-execution validation phase that marks each node as either parallel-safe or not parallel-safe.
+
+Example:
+
+```rust
+struct ParallelSafety {
+    parallel_safe: bool,
+    reasons: Vec<ParallelSafetyReason>,
+}
+```
+
+Example reasons:
+
+```rust
+enum ParallelSafetyReason {
+    SequentialGroup,
+    RequiresPythonCallback,
+    RequiresMutableResolverDuringExecution,
+    HasUnresolvedCrossObjectDependency,
+    WritesOverlappingOutputColumn,
+    MissingPreloadedMetadata,
+    UnknownDependencyBoundary,
+}
+```
+
+Each `ExecNode` should include the validation result:
+
+```rust
+struct ExecNode {
+    id: NodeId,
+    block_id: BlockId,
+    deps: Vec<NodeId>,
+    outputs: Vec<ColumnId>,
+    parallel_safety: ParallelSafety,
+}
+```
+
+## Validation Should Check
+
+- Whether all metadata is preloaded
+- Whether dependencies are explicit
+- Whether outputs are distinct
+- Whether the node belongs to a sequential group
+- Whether it requires resolver updates before downstream execution
+- Whether it depends on Python callbacks
+- Whether it mutates shared state
+- Whether output columns overlap with another ready node
+
+## Acceptance Criteria
+
+- Every node has a clear parallel-safety classification.
+- Unsafe nodes are excluded from Rayon execution.
+- Validation errors are clear and actionable.
+- Sequential nodes are always marked unsafe initially.
+- Missing metadata marks the node as unsafe or fails before execution.
+- Tests cover safe node classification.
+- Tests cover unsafe node classification.
+- Tests cover overlapping output columns.
+- Tests cover Python callback dependency detection.
+- Tests cover sequential group safety handling.
+
+---
+
+# Issue 18: Optimize Formula Dependency Parsing and Graph Build
+
+## Summary
+
+Improve formula dependency extraction so the Rust execution graph can be built accurately and efficiently without repeatedly parsing formulas during scheduling or execution.
+
+## Problem
+
+A future Rust-side Kahn scheduler requires accurate dependency tracking between nodes.
+
+If formula references are parsed repeatedly during execution, graph construction and scheduling can become slower and more error-prone.
+
+Formula dependency parsing is especially important for references like:
+
+```text
+ind259068
+block39951___ind259068
+property references
+variable filter references
+connected block references
+```
+
+## Proposed Direction
+
+Extract formula dependencies once during graph construction.
+
+Store parsed dependency information directly in each `ExecNode`.
+
+Example:
+
+```rust
+struct ExecNode {
+    id: NodeId,
+    block_id: BlockId,
+    deps: Vec<NodeId>,
+    output_columns: Vec<ColumnId>,
+    same_block_deps: Vec<ColumnId>,
+    cross_object_deps: Vec<CrossObjectDependency>,
+    property_deps: Vec<PropertyId>,
+    parallel_safe: bool,
+}
+```
+
+Example cross-object dependency:
+
+```rust
+struct CrossObjectDependency {
+    source_block_id: BlockId,
+    source_column_id: ColumnId,
+    required_before_node: NodeId,
+}
+```
+
+The scheduler should use this dependency information directly instead of parsing formula strings repeatedly.
+
+## Acceptance Criteria
+
+- Formula dependencies are parsed once during graph construction.
+- Same-block dependencies are represented explicitly.
+- Cross-object dependencies are represented explicitly.
+- Property dependencies are represented explicitly.
+- Scheduler does not parse formula strings repeatedly.
+- Dependency extraction handles same-block indicator references.
+- Dependency extraction handles cross-block indicator references.
+- Dependency extraction handles property references.
+- Dependency extraction handles sequential group dependencies.
+- Tests cover dependency parsing.
+- Tests cover graph ordering.
+- Tests cover missing dependency detection.
+- Tests cover invalid formula reference errors.
+
+---
+
+# Recommended Priority for Issues 10–18
+
+Suggested implementation order:
+
+1. Issue 10: Expand and Normalize `PreloadedMetadata` for Worker-Safe Execution
+2. Issue 11: Introduce Snapshot-Friendly Column Storage Using Shared `Arc` Data
+3. Issue 14: Add Dependency-Aware Resolver Snapshot Refresh
+4. Issue 15: Batch `NodeOutput` Merge Operations
+5. Issue 17: Add Pre-Execution Validation for Parallel-Safety
+6. Issue 18: Optimize Formula Dependency Parsing and Graph Build
+7. Issue 12: Add Rayon-Based Ready-Layer Parallel Execution Behind a Feature Flag
+8. Issue 13: Replace Hot-Path String Lookups with Interned IDs
+9. Issue 16: Add Execution Profiling and Benchmarks for Scheduler, Snapshot, Merge, and Resolver
+
+---
+
+# Overall Notes
+
+These issues should not introduce Python callbacks inside Rust worker execution.
+
+The preferred architecture is:
+
+```text
+Before execution:
+  Python builds CalcPlan
+  Rust validates plan
+  Rust preloads metadata
+  Rust builds execution graph
+  Rust validates parallel-safety
+
+During execution:
+  Coordinator owns ExecutionContext
+  Coordinator owns ready queue and graph indegrees
+  Workers receive immutable ExecutionSnapshot
+  Workers execute node logic
+  Workers return NodeOutput
+  Merge phase mutates ExecutionContext
+
+After merge:
+  Resolver refresh happens only when required
+  Dependent nodes are released
+  Final output format remains unchanged
+```
+
+Avoid this pattern:
+
+```rust
+Arc<Mutex<ExecutionContext>>
+```
+
+for the full node execution lifecycle.
+
+Prefer this pattern:
+
+```text
+Build immutable snapshot
+        ↓
+Execute node without mutating global state
+        ↓
+Return NodeOutput
+        ↓
+Batch merge outputs in controlled mutation phase
+        ↓
+Refresh resolver only when needed
+        ↓
+Release dependent nodes
+```
+
+This gives the executor a safe path toward real Rayon-based parallel execution without breaking current calculation semantics.
