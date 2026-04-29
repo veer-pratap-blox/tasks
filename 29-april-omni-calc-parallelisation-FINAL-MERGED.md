@@ -1,26 +1,20 @@
-# Final Merged Omni-Calc Performance / Parallelisation Jira Roadmap
+# Final Corrected Merged Omni-Calc Performance / Parallelisation Jira Roadmap
 
-## Branch / Code Reference
+## Reference
 
-Branch:
-
-```text
-Blox-Dev / BLOX-2104-improve-preload-snapshot-py-rust-pass
-```
-
-GitHub:
-
-```text
-https://github.com/BloxSoftware/Blox-Dev/tree/BLOX-2104-improve-preload-snapshot-py-rust-pass
-```
-
-Reference planning document:
+Source planning file:
 
 ```text
 https://github.com/veer-pratap-blox/tasks/blob/main/29-april-omni-calc-parallelisation-FINAL.md
 ```
 
-Primary Rust areas reviewed / affected:
+Code branch:
+
+```text
+https://github.com/BloxSoftware/Blox-Dev/tree/BLOX-2104-improve-preload-snapshot-py-rust-pass
+```
+
+Primary Omni-Calc Rust areas:
 
 ```text
 modelAPI/omni-calc/src/engine/exec/executor.rs
@@ -42,199 +36,110 @@ modelAPI/omni-calc/Cargo.toml
 
 ---
 
-# High-Level Summary
+# Important Correction
 
-The original planning document had 21 detailed issues related to Omni-Calc performance, parallelisation, data-structure improvements, clone reduction, preloaded data usage, and Rust execution safety.
-
-This final version merges related issues into **10 final Jira issues** in the correct implementation order.
-
-The goal is to move Omni-Calc from the current model:
+Earlier mapping incorrectly described Source Issue 10 as:
 
 ```text
-Python DAG manager creates ordered calc_steps
-        ↓
-Rust receives CalcPlan
-        ↓
-Rust creates one mutable ExecutionContext
-        ↓
-Rust loops through calc_steps in order
-        ↓
-Each node directly mutates shared state
-        ↓
-Resolver is updated during node processing
-        ↓
-Final RecordBatches are built
+Cached parsed formula AST and dependency metadata
 ```
 
-toward the target architecture:
+Correct Source Issue 10 is:
 
 ```text
-Benchmark baseline
-    ↓
-Better data structures + less cloning
-    ↓
-Immutable snapshots + NodeOutput
-    ↓
-Central merge phase
-    ↓
-Explicit Rust-side execution graph
-    ↓
-Single-threaded Kahn scheduler
-    ↓
-Preloaded-only execution hot path
-    ↓
-Safe resolver snapshots / materialization boundaries
-    ↓
-Targeted algorithmic optimizations
-    ↓
-Safe pre/post parallelism
-    ↓
-Configurable Rayon ready-node execution
+Issue 10 — Expand and Normalize PreloadedMetadata for Worker-Safe Execution
+```
+
+So Source Issue 10 belongs with the scheduler / worker-safety foundation because complete normalized preload is required before worker-safe execution.
+
+Corrected statement:
+
+```text
+Final Issue 3 merges:
+- Source Issue 1 — Core scheduler foundation
+- Source Issue 10 — Expand and Normalize PreloadedMetadata for Worker-Safe Execution
 ```
 
 ---
 
-# Important Global Rules
+# Global Rule For All Issues
 
-## 1. No Python callbacks inside Rust execution hot path
-
-After preload, Omni-Calc Rust execution should use Rust-owned data only.
+After preload, Omni-Calc Rust execution must use Rust-owned data.
 
 Allowed PyO3 usage:
 
 ```text
 Python binding boundary
 CalcPlan extraction
-explicit metadata preload before Rust execution
+explicit preload before Rust execution
 returning result back to Python
 ```
 
-Not allowed inside execution hot path:
+Not allowed inside Rust execution hot path:
 
 ```text
 Python<'_>
 PyObject
 metadata_cache.call_method1(...)
 metadata_cache.getattr(...)
-lazy metadata callbacks from node execution
-lazy metadata callbacks from Rayon workers
-lazy metadata callbacks from formula evaluation
-lazy metadata callbacks from resolver / join logic
+lazy metadata callback from node execution
+lazy metadata callback from formula evaluation
+lazy metadata callback from resolver / join logic
+lazy metadata callback from Rayon workers
 ```
 
-Correct direction:
+Correct execution direction:
 
 ```text
-Preload once
+Python boundary
     ↓
-Store in Rust-owned PreloadedMetadata
+Preload all required metadata into Rust-owned PreloadedMetadata
     ↓
-Use immutable snapshots / Arc references
+Run Rust execution under py.allow_threads
     ↓
-Execute without Python callbacks
+Use ExecutionSnapshot / PreloadedMetadata / PropertyCacheSnapshot
+    ↓
+No Python callback inside executor hot path
 ```
 
 ---
 
-## 2. Do not start with global Arc<Mutex<ExecutionContext>>
-
-This is rejected:
-
-```rust
-let ctx = Arc::new(Mutex::new(ctx));
-
-ready_nodes.into_par_iter().for_each(|node| {
-    let mut ctx = ctx.lock().unwrap();
-    process_node(&mut ctx, node);
-});
-```
-
-Reason:
+# Final Corrected Source Issue Mapping
 
 ```text
-This makes execution thread-safe but not meaningfully parallel.
-The entire node execution is serialized behind one global lock.
-Formula evaluation, resolver updates, and state mutation all happen while holding the lock.
-It can be slower than the current serial implementation.
-```
-
-Correct direction:
-
-```text
-ExecutionContext = coordinator-owned mutable state
-ExecutionSnapshot = read-only worker input
-NodeOutput = worker result
-merge_node_output = short deterministic mutation phase
+Source Issue 1  -> Final Issue 3
+Source Issue 2  -> Final Issue 10
+Source Issue 3  -> Final Issue 6
+Source Issue 4  -> Final Issue 6
+Source Issue 5  -> Final Issue 5
+Source Issue 6  -> Final Issue 5
+Source Issue 7  -> Final Issue 2
+Source Issue 8  -> Final Issue 2
+Source Issue 9  -> Final Issue 5
+Source Issue 10 -> Final Issue 3
+Source Issue 11 -> Final Issue 4
+Source Issue 12 -> Final Issue 4
+Source Issue 13 -> Final Issue 1
+Source Issue 14 -> Final Issue 1
+Source Issue 15 -> Final Issue 7
+Source Issue 16 -> Final Issue 8
+Source Issue 17 -> Final Issue 9
+Source Issue 18 -> Final Issue 1
+Source Issue 19 -> Final Issue 2
+Source Issue 20 -> Final Issue 4
+Source Issue 21 -> Final Issue 2
 ```
 
 ---
 
-## 3. Do not parallelize sequential groups initially
-
-Sequential functions such as:
-
-```text
-rollfwd(...)
-prior(...)
-balance(...)
-change(...)
-lookup(...)
-```
-
-must remain atomic initially because they rely on period order, entity state, and prior-period values.
-
-Sequential groups should be represented as:
-
-```rust
-ExecNodeType::SequentialGroup
-```
-
-with:
-
-```rust
-parallel_safe = false
-```
-
----
-
-# Source Issue Mapping
-
-The original 21 issues are merged into the final 10 issues as follows:
-
-```text
-Issue 1  -> Final Issue 3
-Issue 2  -> Final Issue 10
-Issue 3  -> Final Issue 6
-Issue 4  -> Final Issue 6
-Issue 5  -> Final Issue 5
-Issue 6  -> Final Issue 5
-Issue 7  -> Final Issue 2
-Issue 8  -> Final Issue 2
-Issue 9  -> Final Issue 5
-Issue 10 -> Final Issue 3
-Issue 11 -> Final Issue 4
-Issue 12 -> Final Issue 4
-Issue 13 -> Final Issue 1
-Issue 14 -> Final Issue 1
-Issue 15 -> Final Issue 7
-Issue 16 -> Final Issue 8
-Issue 17 -> Final Issue 9
-Issue 18 -> Final Issue 1
-Issue 19 -> Final Issue 2
-Issue 20 -> Final Issue 4
-Issue 21 -> Final Issue 2
-```
-
----
-
-# Correct Implementation Order
+# Final Correct Implementation Order
 
 ```text
 1. Final Issue 1 — Benchmarking, Performance Baseline, and Debug Hot-Path Cleanup
 
 2. Final Issue 2 — Data Structure, Clone Reduction, Shared References, FormulaEvaluator Context, and Typed IDs Foundation
 
-3. Final Issue 3 — Core Kahn-Style Scheduler Foundation
+3. Final Issue 3 — Core Kahn-Style Scheduler Foundation + Complete PreloadedMetadata Worker-Safe Execution
 
 4. Final Issue 4 — Actuals, Forecast, and Dimension Row Metadata Optimization
 
@@ -242,13 +147,51 @@ Issue 21 -> Final Issue 2
 
 6. Final Issue 6 — Pre/Post Processing Parallelism
 
-7. Final Issue 7 — Standalone Issue 15
+7. Final Issue 7 — Standalone Source Issue 15
 
-8. Final Issue 8 — Standalone Issue 16
+8. Final Issue 8 — Standalone Source Issue 16
 
-9. Final Issue 9 — Standalone Issue 17
+9. Final Issue 9 — Standalone Source Issue 17
 
 10. Final Issue 10 — Configurable Rayon-Based Parallel Ready-Node Execution
+```
+
+---
+
+# Why This Order Is Correct
+
+```text
+Benchmark first
+    ↓
+Know current runtime and memory baseline
+
+Data structure / clone cleanup second
+    ↓
+Avoid making Rayon execution memory-bound
+
+Scheduler + complete preload foundation third
+    ↓
+Build safe execution architecture and remove Python callback risk
+
+Actuals / dimension row metadata fourth
+    ↓
+Reduce repeated row-key and forecast handling costs
+
+Cross-object join optimization fifth
+    ↓
+Optimize resolver/join paths before parallel workers hit them heavily
+
+Pre/post parallelism sixth
+    ↓
+Implement safer independent parallel wins
+
+Standalone issues next
+    ↓
+Resolve remaining specific source issues before final parallel execution
+
+Rayon ready-node execution last
+    ↓
+Only after correctness, preloaded-only execution, resolver safety, and serial Kahn parity are proven
 ```
 
 ---
@@ -270,16 +213,16 @@ Add Omni-Calc Performance Benchmark Baseline and Remove Debug Hot-Path Overhead
 ## Source Issues Merged
 
 ```text
-Issue 13 - Benchmark harness / performance regression gates
-Issue 14 - Debug hot-path cleanup
-Issue 18 - Performance observability / benchmark-related cleanup
+Source Issue 13
+Source Issue 14
+Source Issue 18
 ```
 
 ---
 
 ## Summary
 
-Create a reliable benchmark and profiling foundation for Omni-Calc before implementing major scheduler, data-structure, clone-reduction, or Rayon parallelism changes.
+Create a reliable benchmark, profiling, and observability foundation before implementing major scheduler, data-structure, clone-reduction, preload, resolver, join, or Rayon parallelism changes.
 
 This issue should establish a clear before/after baseline for the current serial executor and remove debug/logging paths that allocate, clone, or distort runtime performance.
 
@@ -302,20 +245,22 @@ formula evaluation
 cross-object resolver updates
 join path creation
 lookup aggregation
+actuals / forecast handling
 RecordBatch materialization
 final result build
 ```
 
-Before making structural changes, we need benchmarks that show where time is currently spent.
+Before optimizing these areas, we need reliable benchmarks.
 
-Without benchmarks, performance changes may:
+Without this baseline, later refactors may:
 
 ```text
 look faster in theory but not in practice
-improve one model shape and regress another
+improve one model shape but regress another
 increase memory pressure
 hide clone overhead behind parallelism
 make Rayon execution memory-bound
+make debugging harder
 ```
 
 ---
@@ -326,28 +271,29 @@ Current risks:
 
 ```text
 1. No consistent benchmark baseline for Omni-Calc execution.
-2. No breakdown by execution phase.
+2. No clear phase-level runtime breakdown.
 3. No benchmark for formula evaluation alone.
 4. No benchmark for resolver update/materialization.
 5. No benchmark for cross-object join alignment.
-6. No benchmark for RecordBatch creation.
-7. No benchmark for clone-heavy evaluator setup.
-8. Debug logs and diagnostics may allocate in hot paths.
-9. Hardcoded debug paths can distort performance.
-10. Future refactors may accidentally regress performance without being caught.
+6. No benchmark for lookup aggregation.
+7. No benchmark for final RecordBatch creation.
+8. No benchmark for clone-heavy evaluator setup.
+9. Debug logs and diagnostics may allocate in hot paths.
+10. Hardcoded debug paths can distort production performance.
+11. Future refactors can accidentally regress performance without being caught.
 ```
 
 ---
 
 ## Scope
 
-Add benchmark and measurement coverage for:
+Add benchmark coverage for:
 
 ```text
 1. Full Omni-Calc execution
 2. Current serial calc_steps execution
 3. Future single-threaded Kahn scheduler
-4. Future Rayon-ready-node execution
+4. Future Rayon ready-node execution
 5. Formula evaluation
 6. FormulaEvaluator setup
 7. Input indicator processing
@@ -377,7 +323,7 @@ Clean up or gate:
 
 ## Proposed Change
 
-Add benchmark harness or internal performance mode.
+Add a benchmark harness or internal performance mode.
 
 Recommended metrics:
 
@@ -404,7 +350,7 @@ node_count
 warning_count
 ```
 
-Add benchmark scenarios:
+Benchmark scenarios:
 
 ```text
 small model
@@ -417,12 +363,24 @@ sequential-heavy model
 property-heavy model
 ```
 
-Add config flags:
+Suggested flags:
 
 ```text
 CALC_DEBUG=false by default
 CALC_PERF_TRACE=false by default
 CALC_BENCH_MODE=true only in benchmark runs
+```
+
+---
+
+## Expected Impact
+
+```text
+1. Makes future optimization measurable.
+2. Prevents performance regressions.
+3. Helps decide where Rayon is actually useful.
+4. Helps identify clone-heavy and allocation-heavy paths.
+5. Provides safe baseline before scheduler changes.
 ```
 
 ---
@@ -534,10 +492,10 @@ Optimize Omni-Calc Data Structures, Clone Reduction, Shared References, FormulaE
 ## Source Issues Merged
 
 ```text
-Issue 7  - Optimize CalcObjectState column storage and lookup
-Issue 8  - Reduce cloning and reuse preloaded/shared data
-Issue 19 - Optimize FormulaEvaluator context cloning and shared column access
-Issue 21 - Introduce structured node and column identifiers
+Source Issue 7
+Source Issue 8
+Source Issue 19
+Source Issue 21
 ```
 
 ---
@@ -566,7 +524,7 @@ memory pressure
 
 Current state and evaluator paths are string-heavy and clone-heavy.
 
-Current examples:
+Common structures:
 
 ```rust
 Vec<(String, Vec<f64>)>
@@ -672,7 +630,7 @@ type SharedNumberColumn = Arc<[f64]>;
 type SharedStringColumn = Arc<[String]>;
 ```
 
-or as an easier first step:
+or easier first step:
 
 ```rust
 type SharedNumberColumn = Arc<Vec<f64>>;
@@ -782,41 +740,30 @@ Keep external output names unchanged.
 
 ## Proposed Implementation Plan
 
-### Phase 1
-
-Add `ColumnStore<T>` with stable order and indexed lookup.
-
-### Phase 2
-
-Convert dynamic columns:
-
 ```text
-number_columns
-string_columns
-connected_dim_columns
+Phase 1 - Add ColumnStore<T> with stable order and indexed lookup.
+Phase 2 - Convert dynamic number/string/connected columns to ColumnStore.
+Phase 3 - Add shared column aliases and avoid vector cloning in snapshots/evaluators where safe.
+Phase 4 - Refactor FormulaEvaluator to share immutable EvalContext.
+Phase 5 - Use Arc<PreloadedMetadata> / immutable property cache snapshots.
+Phase 6 - Introduce typed ID helpers and conversion functions.
+Phase 7 - Gradually migrate graph/scheduler/resolver to typed IDs where beneficial.
 ```
 
-to use `ColumnStore`.
+---
 
-### Phase 3
+## Expected Impact
 
-Add shared column aliases and avoid vector cloning in snapshots/evaluators where safe.
-
-### Phase 4
-
-Refactor `FormulaEvaluator` to share immutable `EvalContext`.
-
-### Phase 5
-
-Use `Arc<PreloadedMetadata>` / immutable property cache snapshots.
-
-### Phase 6
-
-Introduce typed ID helpers and conversion functions.
-
-### Phase 7
-
-Gradually migrate graph/scheduler/resolver to typed IDs where beneficial.
+```text
+1. Faster column lookup.
+2. Faster duplicate checks.
+3. Less memory allocation.
+4. Lower peak memory usage.
+5. Faster FormulaEvaluator setup.
+6. Cheaper child evaluator creation.
+7. Better use of Rust-owned preloaded data.
+8. Better foundation for safe Rayon execution.
+```
 
 ---
 
@@ -932,30 +879,34 @@ Technical Task / Refactor
 
 ## Title
 
-Refactor Rust Omni-Calc Executor Toward Safe Kahn-Style DAG Scheduling Foundation
+Refactor Rust Omni-Calc Executor Toward Safe Kahn-Style DAG Scheduling Foundation and Worker-Safe PreloadedMetadata
 
 ---
 
 ## Source Issues Merged
 
 ```text
-Issue 1  - Core scheduler foundation
-Issue 10 - Cached parsed formula AST and dependency metadata
+Source Issue 1  - Core scheduler foundation
+Source Issue 10 - Expand and Normalize PreloadedMetadata for Worker-Safe Execution
 ```
 
-Includes original foundation sub-work:
+---
+
+## Important Correction
+
+Source Issue 10 is:
 
 ```text
-Immutable snapshots
-NodeOutput
-Central merge phase
-Rust-side execution graph
-Single-threaded Kahn scheduler
-Resolver snapshot/materialization safety
-Preloaded-only execution hot path
-Reject global Arc<Mutex<ExecutionContext>>
-Do not parallelize sequential groups initially
+Expand and Normalize PreloadedMetadata for Worker-Safe Execution
 ```
+
+It is not:
+
+```text
+Cached parsed formula AST and dependency metadata
+```
+
+This issue must therefore cover complete preload normalization and worker-safe metadata access.
 
 ---
 
@@ -969,6 +920,8 @@ Target flow:
 
 ```text
 Current serial executor
+    ↓
+Complete normalized PreloadedMetadata
     ↓
 ExecutionSnapshot
     ↓
@@ -1035,24 +988,107 @@ Current executor limitations:
 3. Rust does not know which nodes are independently ready.
 4. Node execution mutates ExecutionContext directly.
 5. Resolver is updated during node processing.
-6. Formula dependency metadata is not structured for Rust-side scheduling.
-7. Sequential groups must remain atomic.
-8. Python callbacks must not occur in execution hot path.
+6. PreloadedMetadata may not yet be normalized for all worker execution needs.
+7. Property maps and dimension items must be complete before execution.
+8. Worker-safe execution cannot call Python/PyO3.
+9. Sequential groups must remain atomic.
 ```
 
 ---
 
 ## Scope
 
-Add:
+### 1. Complete and Normalize PreloadedMetadata
+
+Current preload direction:
 
 ```rust
-struct ExecutionSnapshot { ... }
-struct NodeOutput { ... }
-fn merge_node_output(ctx: &mut ExecutionContext, output: NodeOutput) { ... }
+pub struct PreloadedMetadata {
+    pub dimension_items: HashMap<i64, Vec<DimensionItem>>,
+    pub property_maps: HashMap<(i64, i64, i64), HashMap<i64, String>>,
+}
 ```
 
-Add:
+This issue should expand/normalize preload so worker execution has everything required without Python callbacks.
+
+Required preload coverage:
+
+```text
+dimension items
+dimension item IDs
+property maps
+numeric property values
+string property values
+linked dimension properties
+property maps by scenario
+metadata needed for property nodes
+metadata needed for cross-object joins
+metadata needed for connected dimensions
+metadata needed for filters
+metadata needed by formula evaluation
+```
+
+Preloaded data should be stored in Rust-owned immutable structures:
+
+```rust
+Arc<PreloadedMetadata>
+```
+
+or equivalent.
+
+Missing required preload data should fail early before execution:
+
+```text
+Do not lazy-load missing metadata from Python during execution.
+```
+
+---
+
+### 2. Add ExecutionSnapshot
+
+```rust
+struct ExecutionSnapshot {
+    block_key: String,
+    block_spec: Arc<BlockSpec>,
+    dim_columns: Arc<...>,
+    number_columns: Arc<...>,
+    string_columns: Arc<...>,
+    connected_dim_columns: Arc<...>,
+    resolver_snapshot: Arc<CrossObjectResolverSnapshot>,
+    preloaded_metadata: Arc<PreloadedMetadata>,
+    property_cache_snapshot: Arc<PropertyCacheSnapshot>,
+}
+```
+
+---
+
+### 3. Add NodeOutput
+
+```rust
+struct NodeOutput {
+    block_key: String,
+    number_columns: Vec<...>,
+    string_columns: Vec<...>,
+    connected_dim_columns: Vec<...>,
+    warnings: Vec<CalcWarning>,
+    nodes_calculated: usize,
+    should_update_resolver: bool,
+}
+```
+
+---
+
+### 4. Add Central Merge Phase
+
+```rust
+fn merge_node_output(ctx: &mut ExecutionContext, output: NodeOutput) {
+    // only place where shared state is updated
+}
+```
+
+---
+
+### 5. Add ExecutionGraph
 
 ```rust
 struct ExecutionGraph {
@@ -1062,7 +1098,7 @@ struct ExecutionGraph {
 }
 ```
 
-Add:
+Node type:
 
 ```rust
 enum ExecNodeType {
@@ -1073,25 +1109,23 @@ enum ExecNodeType {
 }
 ```
 
-Add formula dependency metadata:
+---
 
-```rust
-struct FormulaDependencyInfo {
-    input_indicators: Vec<NodeId>,
-    property_refs: Vec<PropertyId>,
-    cross_object_refs: Vec<CrossObjectRef>,
-    sequential_functions: Vec<String>,
-}
-```
+### 6. Add Single-Threaded Kahn Scheduler
 
-Cache parsed formula AST / dependency info:
+First implementation must remain single-threaded.
 
-```rust
-struct PlannedFormula {
-    node_id: NodeId,
-    parsed_ast: Arc<AstNode>,
-    dependency_info: FormulaDependencyInfo,
-}
+Pseudo-flow:
+
+```text
+build graph
+find zero-indegree nodes
+execute one ready node
+return NodeOutput
+merge output
+update resolver if needed
+decrement dependents
+enqueue newly ready nodes
 ```
 
 ---
@@ -1121,24 +1155,6 @@ struct CrossObjectResolverSnapshot {
     variable_filters: Arc<HashMap<String, VariableFilter>>,
 }
 ```
-
----
-
-## Scheduler Requirements
-
-Add single-threaded Kahn scheduler first:
-
-```text
-build graph
-find zero-indegree nodes
-execute one ready node
-merge output
-update resolver if needed
-decrement dependents
-enqueue newly ready nodes
-```
-
-No Rayon yet.
 
 ---
 
@@ -1184,21 +1200,36 @@ metadata_cache.getattr(...)
 
 ---
 
+## Expected Impact
+
+```text
+1. Creates safe foundation for future parallelism.
+2. Removes Python callback risk from worker execution.
+3. Makes preload completeness explicit and testable.
+4. Enables deterministic merge and resolver update boundaries.
+5. Enables single-threaded Kahn scheduler parity testing.
+6. Prevents global lock based false parallelism.
+```
+
+---
+
 ## Acceptance Criteria
 
 ```text
-1. ExecutionSnapshot exists.
-2. NodeOutput exists.
-3. Shared state mutation is centralized in merge.
-4. ExecutionGraph exists.
-5. Graph tracks dependencies, outgoing edges, and indegrees.
-6. Formula dependency metadata is cached/reused.
-7. Single-threaded Kahn scheduler exists behind config/feature flag.
-8. Single-threaded Kahn output matches current serial calc_steps output.
-9. Resolver updates happen at safe boundaries.
-10. Sequential groups are atomic.
-11. No global Arc<Mutex<ExecutionContext>> production design.
-12. No PyO3/Python callbacks in execution hot path.
+1. PreloadedMetadata is expanded/normalized for worker-safe execution.
+2. All metadata required by worker-ready execution is available before execution starts.
+3. Missing required metadata fails early with clear diagnostics.
+4. ExecutionSnapshot exists.
+5. NodeOutput exists.
+6. Shared state mutation is centralized in merge.
+7. ExecutionGraph exists.
+8. Graph tracks dependencies, outgoing edges, and indegrees.
+9. Single-threaded Kahn scheduler exists behind config/feature flag.
+10. Single-threaded Kahn output matches current serial calc_steps output.
+11. Resolver updates happen at safe boundaries.
+12. Sequential groups are atomic.
+13. No global Arc<Mutex<ExecutionContext>> production design.
+14. No PyO3/Python callbacks in execution hot path.
 ```
 
 ---
@@ -1208,6 +1239,12 @@ metadata_cache.getattr(...)
 Add tests for:
 
 ```text
+PreloadedMetadata completeness
+missing dimension items
+missing property map
+missing linked dimension property
+missing filter metadata
+preloaded-only mode rejects missing metadata
 ExecutionSnapshot build
 NodeOutput merge
 duplicate column merge
@@ -1220,7 +1257,6 @@ cycle detection
 topological order parity
 single-threaded Kahn vs current serial output
 resolver update boundary
-missing preloaded metadata
 ```
 
 ---
@@ -1235,6 +1271,7 @@ Parallel sequential groups
 Changing output format
 Changing calculation semantics
 Changing Python DAG manager behavior
+Lazy Python metadata fallback
 ```
 
 ---
@@ -1268,7 +1305,9 @@ execution-snapshot
 node-output
 resolver
 preload
+preloaded-metadata
 python-ffi
+worker-safe
 parallelism-foundation
 ```
 
@@ -1281,8 +1320,8 @@ Omni-Calc
 Rust Engine
 Executor
 Scheduler
-Cross-Object Resolver
 Preload
+Cross-Object Resolver
 Python Boundary
 ```
 
@@ -1298,16 +1337,16 @@ Performance / Algorithm Optimization / Refactor
 
 ## Title
 
-Optimize Actuals, Forecast Handling, Dimension Row Metadata, and Entity Key Reuse
+Optimize Actuals, Forecast, Dimension Row Metadata, and Entity Key Reuse
 
 ---
 
 ## Source Issues Merged
 
 ```text
-Issue 11 - Actuals / forecast row-key handling
-Issue 12 - Reuse dimension-combination metadata / compact row representation
-Issue 20 - Actuals, forecast indices, and entity key reuse
+Source Issue 11
+Source Issue 12
+Source Issue 20
 ```
 
 ---
@@ -1389,45 +1428,29 @@ struct ActualsContext {
 
 ## Proposed Implementation Plan
 
-### Phase 1
-
-Precompute forecast mask per block.
-
-Current style:
-
-```rust
-forecast_indices.contains(&row_idx)
+```text
+Phase 1 - Precompute forecast mask per block.
+Phase 2 - Precompute row dimension keys once per block.
+Phase 3 - Precompute row entity keys once per block, excluding time dimension.
+Phase 4 - Update actuals loading to use cached row keys.
+Phase 5 - Update sequential/last-actual logic to reuse entity keys.
+Phase 6 - Avoid unnecessary cloning in ActualsContext.
+Phase 7 - Optionally move from string keys to compact IDs after typed IDs / join-key optimizations are ready.
 ```
 
-Target:
+---
 
-```rust
-forecast_mask[row_idx]
+## Expected Impact
+
+```text
+1. Faster actuals loading.
+2. Faster sequential function setup.
+3. Faster last-actual-by-entity extraction.
+4. Less repeated string allocation.
+5. Less repeated sorting/joining of key parts.
+6. Faster forecast membership checks.
+7. Reduced memory churn.
 ```
-
-### Phase 2
-
-Precompute row dimension keys once per block.
-
-### Phase 3
-
-Precompute row entity keys once per block, excluding time dimension.
-
-### Phase 4
-
-Update actuals loading to use cached row keys.
-
-### Phase 5
-
-Update sequential/last-actual logic to reuse entity keys.
-
-### Phase 6
-
-Avoid unnecessary cloning in `ActualsContext`.
-
-### Phase 7
-
-Optionally move from string keys to compact IDs after typed IDs / join-key optimizations are ready.
 
 ---
 
@@ -1544,9 +1567,9 @@ Optimize Cross-Object Join Path Creation, Lookup Aggregation, and Join-Key Repre
 ## Source Issues Merged
 
 ```text
-Issue 5 - Parallel join-path creation/alignment
-Issue 6 - Parallel lookup-map aggregation
-Issue 9 - Better join-key representation / avoid repeated string join paths
+Source Issue 5
+Source Issue 6
+Source Issue 9
 ```
 
 ---
@@ -1669,6 +1692,18 @@ Start with a compatible wrapper and migrate gradually.
 
 ---
 
+## Expected Impact
+
+```text
+1. Faster large cross-object joins.
+2. Less string allocation.
+3. Less memory pressure.
+4. Faster resolver alignment.
+5. Better use of Rayon where row counts justify it.
+```
+
+---
+
 ## Acceptance Criteria
 
 ```text
@@ -1780,8 +1815,8 @@ Parallelize Safe Pre/Post Execution Processing: RecordBatch Materialization and 
 ## Source Issues Merged
 
 ```text
-Issue 3 - Parallel final RecordBatch materialization
-Issue 4 - Parallel connected dimension preload
+Source Issue 3
+Source Issue 4
 ```
 
 ---
@@ -1803,7 +1838,7 @@ These are safer than node-level execution because they are naturally per-block a
 
 ## Problem Statement
 
-Two expensive phases are currently good candidates for safe parallelism:
+Two expensive phases are good candidates for safe parallelism:
 
 ```text
 1. Final RecordBatch materialization
@@ -1840,8 +1875,6 @@ Then sort deterministically:
 batches.sort_by(|a, b| a.0.cmp(&b.0));
 ```
 
----
-
 ### Connected Dimension Preload
 
 Split into compute/merge:
@@ -1858,6 +1891,17 @@ block_keys
     .par_iter()
     .map(|block_key| compute_connected_dims_for_block(...))
     .collect()
+```
+
+---
+
+## Expected Impact
+
+```text
+1. Faster output creation for many-block models.
+2. Faster connected dimension preload for many-block/many-dimension models.
+3. Lower wall-clock time in pre/post execution stages.
+4. Lower risk than node-level parallelism.
 ```
 
 ---
@@ -1959,25 +2003,25 @@ Standalone / Specialized Task
 
 ## Title
 
-Standalone Issue 15 — Verify and Implement Specialized Scheduler / Safety / Performance Task
+Standalone Source Issue 15 — Verify Scope and Implement Without Losing the Original Requirement
 
 ---
 
 ## Source Issue
 
 ```text
-Issue 15
+Source Issue 15
 ```
 
 ---
 
 ## Summary
 
-Keep Issue 15 as a standalone task unless its exact description clearly belongs to one of the merged issues.
+Keep Source Issue 15 as a standalone task unless its exact description clearly belongs to one of the merged issues.
 
 This issue must not be deleted or ignored.
 
-If Issue 15 is about scheduler safety, sequential group safety, global lock rejection, or preloaded-only execution boundaries, then it can be merged into Final Issue 3.
+If Source Issue 15 is about scheduler safety, sequential group safety, global lock rejection, or preloaded-only execution boundaries, then it can be merged into Final Issue 3.
 
 Otherwise, keep it separate and implement it after the core scheduler foundation is complete.
 
@@ -1985,7 +2029,7 @@ Otherwise, keep it separate and implement it after the core scheduler foundation
 
 ## Merge Guidance
 
-Merge into Final Issue 3 only if Issue 15 is about:
+Merge into Final Issue 3 only if Source Issue 15 is about:
 
 ```text
 sequential group safety
@@ -2017,18 +2061,10 @@ Before Final Issue 10
 
 ---
 
-## Problem Statement
-
-Issue 15 is not safely grouped without confirming its exact final content.
-
-To avoid losing the issue, track it as a standalone verification/implementation item.
-
----
-
 ## Scope
 
 ```text
-1. Re-open Issue 15 from the source document.
+1. Re-open Source Issue 15 from the source document.
 2. Confirm exact title and description.
 3. Decide whether it belongs to Final Issue 3 or remains standalone.
 4. If standalone, implement it after scheduler foundation and before Rayon ready-node execution.
@@ -2040,7 +2076,7 @@ To avoid losing the issue, track it as a standalone verification/implementation 
 ## Acceptance Criteria
 
 ```text
-1. Issue 15 is reviewed and not lost.
+1. Source Issue 15 is reviewed and not lost.
 2. Final merge decision is documented.
 3. If merged into Final Issue 3, its requirements are added there.
 4. If standalone, a clear Jira task exists.
@@ -2099,25 +2135,25 @@ Standalone / Specialized Task
 
 ## Title
 
-Standalone Issue 16 — Verify and Implement Specialized DS / Preload / Join / Performance Task
+Standalone Source Issue 16 — Verify Scope and Implement Without Losing the Original Requirement
 
 ---
 
 ## Source Issue
 
 ```text
-Issue 16
+Source Issue 16
 ```
 
 ---
 
 ## Summary
 
-Keep Issue 16 as a standalone task unless its exact description clearly belongs to one of the merged issues.
+Keep Source Issue 16 as a standalone task unless its exact description clearly belongs to one of the merged issues.
 
 This issue must not be deleted or ignored.
 
-If Issue 16 is about clone reduction, shared references, ColumnStore, typed IDs, preloaded data reuse, resolver, join path, lookup aggregation, or join-key representation, then it can be merged into Final Issue 2 or Final Issue 5.
+If Source Issue 16 is about clone reduction, shared references, ColumnStore, typed IDs, preloaded data reuse, resolver, join path, lookup aggregation, or join-key representation, then it can be merged into Final Issue 2 or Final Issue 5.
 
 Otherwise, keep it standalone.
 
@@ -2125,7 +2161,7 @@ Otherwise, keep it standalone.
 
 ## Merge Guidance
 
-Merge into Final Issue 2 if Issue 16 is about:
+Merge into Final Issue 2 if Source Issue 16 is about:
 
 ```text
 clone reduction
@@ -2139,7 +2175,7 @@ less copying
 memory optimization
 ```
 
-Merge into Final Issue 5 if Issue 16 is about:
+Merge into Final Issue 5 if Source Issue 16 is about:
 
 ```text
 resolver
@@ -2176,18 +2212,10 @@ Before Final Issue 10
 
 ---
 
-## Problem Statement
-
-Issue 16 was not safely mapped to one merged issue without confirming its exact source details.
-
-It should remain visible as a standalone task until the exact scope is confirmed.
-
----
-
 ## Scope
 
 ```text
-1. Re-open Issue 16 from the source document.
+1. Re-open Source Issue 16 from the source document.
 2. Confirm exact title and description.
 3. Decide whether it belongs to Final Issue 2, Final Issue 5, or standalone.
 4. If standalone, define concrete implementation and test plan.
@@ -2200,7 +2228,7 @@ It should remain visible as a standalone task until the exact scope is confirmed
 ## Acceptance Criteria
 
 ```text
-1. Issue 16 is reviewed and not lost.
+1. Source Issue 16 is reviewed and not lost.
 2. Final merge decision is documented.
 3. If merged, its requirements are added to the correct merged issue.
 4. If standalone, a clear Jira task exists.
@@ -2263,25 +2291,25 @@ Standalone / Specialized Task
 
 ## Title
 
-Standalone Issue 17 — Verify and Implement Specialized Actuals / Metadata / Pre-Post Processing Task
+Standalone Source Issue 17 — Verify Scope and Implement Without Losing the Original Requirement
 
 ---
 
 ## Source Issue
 
 ```text
-Issue 17
+Source Issue 17
 ```
 
 ---
 
 ## Summary
 
-Keep Issue 17 as a standalone task unless its exact description clearly belongs to one of the merged issues.
+Keep Source Issue 17 as a standalone task unless its exact description clearly belongs to one of the merged issues.
 
 This issue must not be deleted or ignored.
 
-If Issue 17 is about actuals, forecast indices, entity key reuse, dimension row metadata, dimension combinations, RecordBatch materialization, connected dimension preload, or pre/post execution parallelism, then it can be merged into Final Issue 4 or Final Issue 6.
+If Source Issue 17 is about actuals, forecast indices, entity key reuse, dimension row metadata, dimension combinations, RecordBatch materialization, connected dimension preload, or pre/post execution parallelism, then it can be merged into Final Issue 4 or Final Issue 6.
 
 Otherwise, keep it standalone.
 
@@ -2289,7 +2317,7 @@ Otherwise, keep it standalone.
 
 ## Merge Guidance
 
-Merge into Final Issue 4 if Issue 17 is about:
+Merge into Final Issue 4 if Source Issue 17 is about:
 
 ```text
 actuals
@@ -2301,7 +2329,7 @@ row key cache
 sequential metadata reuse
 ```
 
-Merge into Final Issue 6 if Issue 17 is about:
+Merge into Final Issue 6 if Source Issue 17 is about:
 
 ```text
 RecordBatch materialization
@@ -2339,18 +2367,10 @@ Before Final Issue 10
 
 ---
 
-## Problem Statement
-
-Issue 17 was not safely mapped into one merged issue without confirming its exact source details.
-
-It should remain visible as a standalone item until confirmed.
-
----
-
 ## Scope
 
 ```text
-1. Re-open Issue 17 from the source document.
+1. Re-open Source Issue 17 from the source document.
 2. Confirm exact title and description.
 3. Decide whether it belongs to Final Issue 4, Final Issue 6, or standalone.
 4. If standalone, define implementation plan and test coverage.
@@ -2363,7 +2383,7 @@ It should remain visible as a standalone item until confirmed.
 ## Acceptance Criteria
 
 ```text
-1. Issue 17 is reviewed and not lost.
+1. Source Issue 17 is reviewed and not lost.
 2. Final merge decision is documented.
 3. If merged, its requirements are added to the correct merged issue.
 4. If standalone, a clear Jira task exists.
@@ -2434,10 +2454,10 @@ Add Configurable Rayon-Based Parallel Execution for Independent Ready Nodes
 ## Source Issues Merged
 
 ```text
-Issue 2 - Parallel ready-node execution
+Source Issue 2
 ```
 
-Also includes original ticket grouping:
+This issue includes the related parallel execution work originally discussed as:
 
 ```text
 Parallelize independent input indicators
@@ -2465,15 +2485,16 @@ Do not implement Rayon ready-node execution until:
 ```text
 1. Benchmark baseline exists.
 2. Clone-heavy structures are reduced.
-3. ExecutionSnapshot exists.
-4. NodeOutput exists.
-5. Central merge phase exists.
-6. ExecutionGraph exists.
-7. Single-threaded Kahn scheduler matches serial output.
-8. Resolver updates are safe.
-9. Preloaded-only execution path is enforced.
-10. Python callbacks are removed from execution hot path.
-11. Sequential groups remain atomic.
+3. PreloadedMetadata is complete and normalized for worker-safe execution.
+4. ExecutionSnapshot exists.
+5. NodeOutput exists.
+6. Central merge phase exists.
+7. ExecutionGraph exists.
+8. Single-threaded Kahn scheduler matches serial output.
+9. Resolver updates are safe.
+10. Preloaded-only execution path is enforced.
+11. Python callbacks are removed from execution hot path.
+12. Sequential groups remain atomic.
 ```
 
 ---
@@ -2582,6 +2603,17 @@ node does not depend on another node in same batch
 
 ---
 
+## Expected Impact
+
+```text
+1. Main execution speedup for wide models.
+2. Better CPU utilization.
+3. Parallel calculation of dependency-free nodes.
+4. Better scaling after clone reduction and data-structure cleanup.
+```
+
+---
+
 ## Acceptance Criteria
 
 ```text
@@ -2645,13 +2677,13 @@ High, but only after prerequisite issues are complete
 ## Dependencies
 
 ```text
-Depends on Final Issue 1
-Depends on Final Issue 2
-Depends on Final Issue 3
-Strongly benefits from Final Issue 4
-Strongly benefits from Final Issue 5
-Can benefit from Final Issue 6
-Should wait until Final Issue 7/8/9 are resolved or explicitly confirmed as not blocking
+Depends on Final Issue 1.
+Depends on Final Issue 2.
+Depends on Final Issue 3.
+Strongly benefits from Final Issue 4.
+Strongly benefits from Final Issue 5.
+Can benefit from Final Issue 6.
+Should wait until Final Issue 7, 8, and 9 are resolved or explicitly confirmed as not blocking.
 ```
 
 ---
@@ -2693,11 +2725,11 @@ Final Issue 1
   -> required before all performance work
 
 Final Issue 2
-  -> should happen before Final Issue 3, 4, 5, 6, 10
+  -> should happen before Final Issue 3, 4, 5, 6, and 10
 
 Final Issue 3
   -> required before Final Issue 10
-  -> useful before Final Issue 4, 5, 6
+  -> useful before Final Issue 4, 5, and 6
 
 Final Issue 4
   -> should happen before Final Issue 10 for actuals/sequential-heavy models
@@ -2731,7 +2763,7 @@ Final Issue 10
 
 2. Final Issue 2 — Data Structure, Clone Reduction, Shared References, FormulaEvaluator Context, and Typed IDs Foundation
 
-3. Final Issue 3 — Core Kahn-Style Scheduler Foundation
+3. Final Issue 3 — Core Kahn-Style Scheduler Foundation + Worker-Safe PreloadedMetadata
 
 4. Final Issue 4 — Actuals, Forecast, and Dimension Row Metadata Optimization
 
@@ -2739,11 +2771,11 @@ Final Issue 10
 
 6. Final Issue 6 — Pre/Post Processing Parallelism
 
-7. Final Issue 7 — Standalone Issue 15
+7. Final Issue 7 — Standalone Source Issue 15
 
-8. Final Issue 8 — Standalone Issue 16
+8. Final Issue 8 — Standalone Source Issue 16
 
-9. Final Issue 9 — Standalone Issue 17
+9. Final Issue 9 — Standalone Source Issue 17
 
 10. Final Issue 10 — Configurable Rayon-Based Parallel Ready-Node Execution
 ```
@@ -2752,13 +2784,21 @@ Final Issue 10
 
 # Final Notes
 
-This merged roadmap keeps all 21 original issues covered while reducing implementation tracking to 10 final Jira issues.
+This corrected merged roadmap keeps all 21 source issues covered while reducing implementation tracking to 10 final Jira issues.
 
-The most important rule is:
+The most important correction is:
 
 ```text
-Do not start Rayon parallel ready-node execution first.
+Source Issue 10 = Expand and Normalize PreloadedMetadata for Worker-Safe Execution
 ```
+
+Therefore Source Issue 10 belongs in:
+
+```text
+Final Issue 3 — Core Kahn-Style Scheduler Foundation + Worker-Safe PreloadedMetadata
+```
+
+Do not start Rayon parallel ready-node execution first.
 
 Correct implementation path:
 
@@ -2767,13 +2807,15 @@ measure baseline
     ↓
 reduce clones and improve data structures
     ↓
+expand/normalize PreloadedMetadata
+    ↓
 build snapshot/output/merge foundation
     ↓
 build single-threaded Kahn scheduler
     ↓
 prove serial parity
     ↓
-optimize metadata/actuals/join/pre-post phases
+optimize actuals / row metadata / joins / pre-post phases
     ↓
 resolve standalone issues
     ↓
