@@ -213,26 +213,37 @@ Add Omni-Calc Performance Benchmark Baseline and Remove Debug Hot-Path Overhead
 ## Source Issues Merged
 
 ```text
-Source Issue 13
-Source Issue 14
-Source Issue 18
+Source Issue 13 - Benchmark harness / performance baseline / regression gates
+Source Issue 14 - Debug hot-path cleanup / remove expensive diagnostics from production paths
+Source Issue 18 - Performance observability / benchmark reporting / regression tracking
 ```
 
 ---
 
 ## Summary
 
-Create a reliable benchmark, profiling, and observability foundation before implementing major scheduler, data-structure, clone-reduction, preload, resolver, join, or Rayon parallelism changes.
+Create a reliable benchmark, profiling, and observability foundation for the Rust Omni-Calc engine before implementing major scheduler, data-structure, clone-reduction, preload, resolver, join, or Rayon parallelism changes.
 
 This issue should establish a clear before/after baseline for the current serial executor and remove debug/logging paths that allocate, clone, or distort runtime performance.
 
-This issue should be solved first because every later optimization needs measurable proof.
+This issue should be solved first because every later optimization depends on measurable proof.
+
+The goal is to ensure future performance work can answer:
+
+```text
+What is slow today?
+Which phase is slow?
+How much did the change improve?
+Did the change regress another model shape?
+Did memory usage increase?
+Is Rayon actually helping or only adding overhead?
+```
 
 ---
 
 ## Background / Context
 
-Current Omni-Calc execution has several performance-sensitive phases:
+Current Omni-Calc execution has multiple performance-sensitive phases:
 
 ```text
 metadata preload
@@ -242,15 +253,19 @@ property loading
 calculation step processing
 sequential step processing
 formula evaluation
+formula evaluator setup
 cross-object resolver updates
 join path creation
 lookup aggregation
 actuals / forecast handling
 RecordBatch materialization
 final result build
+warning collection
+debug / tracing diagnostics
+clone-heavy state movement
 ```
 
-Before optimizing these areas, we need reliable benchmarks.
+Before optimizing these areas, we need reliable benchmarks and clean hot paths.
 
 Without this baseline, later refactors may:
 
@@ -261,6 +276,63 @@ increase memory pressure
 hide clone overhead behind parallelism
 make Rayon execution memory-bound
 make debugging harder
+introduce performance regressions without detection
+```
+
+This issue is not about optimizing the executor yet. It is about creating the measurement and cleanup foundation required before larger optimization work starts.
+
+---
+
+## Child Issue Coverage
+
+### Source Issue 13 — Benchmark Harness / Performance Baseline / Regression Gates
+
+This source issue is covered by adding a benchmark harness and repeatable performance baseline for the Rust Omni-Calc engine.
+
+Carried-forward scope:
+
+```text
+benchmark full Omni-Calc execution
+benchmark major execution phases separately
+record before/after timings
+capture model-size metadata
+support small / medium / large model benchmarks
+support synthetic and realistic benchmark scenarios
+support manual or CI regression checks
+provide metrics for later optimization issues
+```
+
+### Source Issue 14 — Debug Hot-Path Cleanup
+
+This source issue is covered by removing or gating debug/logging paths that allocate, clone, or collect expensive diagnostic data inside hot execution paths.
+
+Carried-forward scope:
+
+```text
+remove or gate hardcoded debug logs
+avoid always-on warn!/debug! diagnostics in hot loops
+avoid collecting sample vectors unless tracing is enabled
+avoid collecting column names unless tracing is enabled
+avoid building sample key/value strings unless tracing is enabled
+avoid clone-heavy diagnostics in normal execution
+measure logging overhead with tracing disabled vs enabled
+```
+
+### Source Issue 18 — Performance Observability / Reporting / Regression Tracking
+
+This source issue is covered by making benchmark output usable for future engineering decisions.
+
+Carried-forward scope:
+
+```text
+add phase-level timing output
+add benchmark report format
+record baseline numbers
+record model shape metadata
+track runtime and memory-sensitive metrics
+make results comparable across optimization branches
+enable manual or CI performance regression checks
+make later issues prove measurable improvement
 ```
 
 ---
@@ -272,51 +344,178 @@ Current risks:
 ```text
 1. No consistent benchmark baseline for Omni-Calc execution.
 2. No clear phase-level runtime breakdown.
-3. No benchmark for formula evaluation alone.
-4. No benchmark for resolver update/materialization.
-5. No benchmark for cross-object join alignment.
-6. No benchmark for lookup aggregation.
-7. No benchmark for final RecordBatch creation.
-8. No benchmark for clone-heavy evaluator setup.
-9. Debug logs and diagnostics may allocate in hot paths.
-10. Hardcoded debug paths can distort production performance.
-11. Future refactors can accidentally regress performance without being caught.
+3. No benchmark for metadata preload.
+4. No benchmark for bulk preload vs fallback PyO3 preload.
+5. No benchmark for formula evaluation alone.
+6. No benchmark for formula evaluator setup / clone-heavy context setup.
+7. No benchmark for calculation dependency-resolution sub-phases.
+8. No benchmark for resolver update/materialization.
+9. No benchmark for cross-object join alignment.
+10. No benchmark for lookup aggregation.
+11. No benchmark for final RecordBatch creation.
+12. No benchmark for connected dimension preload.
+13. No benchmark for actuals row-key construction.
+14. No benchmark for forecast membership checks.
+15. No benchmark for column lookup / duplicate-check cost.
+16. No benchmark for warning collection / warning cloning cost.
+17. Debug logs and diagnostics may allocate in hot paths.
+18. Hardcoded debug paths can distort production performance.
+19. Future refactors can accidentally regress performance without being caught.
+```
+
+---
+
+## Code Areas / Operations To Benchmark
+
+Primary Rust areas:
+
+```text
+modelAPI/omni-calc/src/engine/exec/executor.rs
+modelAPI/omni-calc/src/engine/exec/context.rs
+modelAPI/omni-calc/src/engine/exec/state.rs
+modelAPI/omni-calc/src/engine/exec/preload.rs
+modelAPI/omni-calc/src/engine/exec/formula_eval.rs
+modelAPI/omni-calc/src/engine/exec/get_source_data/resolver.rs
+modelAPI/omni-calc/src/engine/exec/get_source_data/dim_loader.rs
+modelAPI/omni-calc/src/engine/exec/node_alignment/join_path.rs
+modelAPI/omni-calc/src/engine/exec/node_alignment/lookup.rs
+modelAPI/omni-calc/src/engine/exec/steps/input_handler/mod.rs
+modelAPI/omni-calc/src/engine/exec/steps/calculation.rs
+modelAPI/omni-calc/src/engine/exec/steps/sequential.rs
+modelAPI/omni-calc/src/engine/integration/calc_plan.rs
+modelAPI/omni-calc/src/python.rs
+modelAPI/omni-calc/Cargo.toml
+```
+
+Important operations to benchmark:
+
+```text
+runtime::execute / full executor runtime
+serial calc_steps loop
+preload_metadata
+collect_metadata_needs
+extract_dimension_items_bulk
+extract_property_rows
+input value loading
+input JSON parsing
+forecast start filtering
+actuals merge with input values
+property loading from PreloadedMetadata
+property cache population
+calculation step processing
+calculation dependency resolution
+cross-object dependency resolution
+dimension property column collection
+connected dimension collection
+formula evaluator setup
+formula evaluation
+formula AST / parsed_formula setup
+PropertyFilterContext creation
+time_values clone/setup
+sequential step processing
+resolver update
+RecordBatch materialization
+resolver RecordBatch extraction helpers
+join path creation
+lookup map creation
+target alignment
+lookup aggregation
+warning collection
+column lookup / duplicate checks
+debug/tracing overhead
 ```
 
 ---
 
 ## Scope
 
-Add benchmark coverage for:
+Add benchmark coverage for the following major phases:
 
 ```text
 1. Full Omni-Calc execution
 2. Current serial calc_steps execution
 3. Future single-threaded Kahn scheduler
 4. Future Rayon ready-node execution
-5. Formula evaluation
-6. FormulaEvaluator setup
-7. Input indicator processing
-8. Property loading from PreloadedMetadata
-9. Resolver update/materialization
-10. Cross-object join path creation
-11. Lookup map aggregation
-12. Final RecordBatch materialization
-13. Connected dimension preload
-14. Actuals / forecast handling
-15. Clone-heavy paths
-16. Memory allocation / peak memory where practical
+5. Metadata preload
+6. Input indicator processing
+7. Property loading from PreloadedMetadata
+8. Formula evaluation
+9. FormulaEvaluator setup
+10. Calculation step processing
+11. Sequential step processing
+12. Resolver update/materialization
+13. Cross-object join path creation
+14. Lookup map aggregation
+15. Final RecordBatch materialization
+16. Connected dimension preload
+17. Actuals / forecast handling
+18. Clone-heavy paths
+19. Memory allocation / peak memory where practical
 ```
 
-Clean up or gate:
+Add explicit benchmark coverage for missing detailed sub-paths:
 
 ```text
-1. Hardcoded block-specific debug logs
-2. Debug-only vector sampling in hot paths
-3. Repeated column-name collection for logging
-4. Sample key/value construction unless tracing is enabled
-5. Clone-heavy diagnostics
-6. Expensive log formatting when logs are disabled
+20. PreloadedMetadata bulk preload vs fallback PyO3 preload path
+21. collect_metadata_needs(plan) cost
+22. preload extraction/parsing cost
+23. extract_dimension_items_bulk cost
+24. extract_property_rows cost
+25. Calculation dependency-resolution sub-phases:
+    - connected dimension collection for cross-object joins
+    - cross-object dependency resolution
+    - dimension property column collection
+    - connected dimension property collection
+26. Formula parsing / parsed_formula AST setup cost
+27. PropertyFilterContext creation cost
+28. time_values clone/setup cost
+29. Actuals row-key construction:
+    - build_dimension_key
+    - build_entity_key
+30. Forecast membership checks:
+    - forecast_indices.contains
+    - future forecast mask/bitset checks
+31. Resolver RecordBatch extraction helpers:
+    - get_indicator_values
+    - get_dimension_columns
+    - get_property_column
+    - extract_string_columns_from_batch
+    - extract_connected_dim_columns_from_batch
+32. Warning collection and warning clone cost
+33. HashMap / column lookup cost across:
+    - state.number_columns
+    - state.string_columns
+    - state.connected_dim_columns
+34. Duplicate-check cost during column merge/materialization
+35. Debug/tracing overhead with logging disabled vs enabled
+```
+
+---
+
+## Debug / Hot-Path Cleanup Scope
+
+Clean up or gate the following:
+
+```text
+1. Hardcoded block-specific debug logs.
+2. Hardcoded node-specific debug logs.
+3. Always-on warn! logs in hot execution loops.
+4. Debug-only vector sampling in hot paths.
+5. Repeated column-name collection for logging.
+6. Sample key/value construction unless tracing is enabled.
+7. Clone-heavy diagnostics.
+8. Expensive format! calls when logs are disabled.
+9. Collecting first-N sample paths unless trace/debug is enabled.
+10. Collecting available NodeMap keys unless trace/debug is enabled.
+11. Collecting available filter keys unless trace/debug is enabled.
+12. Summing large vectors only for logs unless trace/debug is enabled.
+13. Building debug-only Vec<String> or Vec<&str> in normal execution.
+```
+
+Logging should follow this principle:
+
+```text
+If debug/tracing is disabled, diagnostic collection should have near-zero runtime and allocation overhead.
 ```
 
 ---
@@ -325,7 +524,68 @@ Clean up or gate:
 
 Add a benchmark harness or internal performance mode.
 
-Recommended metrics:
+Possible implementation options:
+
+```text
+Rust criterion benchmarks
+cargo bench benchmarks
+internal benchmark command
+test-only benchmark utilities
+feature-gated benchmark mode
+structured timing output from executor
+```
+
+Recommended benchmark structure:
+
+```text
+benches/
+  omni_calc_full_execution.rs
+  omni_calc_preload.rs
+  omni_calc_input_steps.rs
+  omni_calc_formula_eval.rs
+  omni_calc_resolver.rs
+  omni_calc_join_alignment.rs
+  omni_calc_recordbatch.rs
+  omni_calc_actuals.rs
+```
+
+Recommended performance instrumentation:
+
+```text
+PerfTimer / PhaseTimer helper
+ExecutionTiming struct
+BenchmarkResult struct
+optional JSON output
+optional CSV output
+```
+
+Example structure:
+
+```rust
+struct ExecutionTiming {
+    total_runtime_ms: f64,
+    preload_runtime_ms: f64,
+    connected_dimension_preload_ms: f64,
+    input_step_ms: f64,
+    property_step_ms: f64,
+    calculation_step_ms: f64,
+    sequential_step_ms: f64,
+    formula_eval_ms: f64,
+    formula_setup_ms: f64,
+    resolver_update_ms: f64,
+    recordbatch_materialization_ms: f64,
+    join_path_creation_ms: f64,
+    lookup_aggregation_ms: f64,
+    actuals_handling_ms: f64,
+    clone_hotspot_ms: f64,
+}
+```
+
+---
+
+## Recommended Metrics
+
+Add these high-level metrics:
 
 ```text
 total_runtime_ms
@@ -350,25 +610,102 @@ node_count
 warning_count
 ```
 
-Benchmark scenarios:
+Add these detailed metrics:
+
+```text
+preload_bulk_ms
+preload_fallback_ms
+metadata_needs_ms
+property_extract_ms
+dimension_extract_ms
+calc_dependency_resolution_ms
+cross_object_resolution_ms
+dimension_property_collection_ms
+connected_dim_collection_ms
+formula_parse_or_ast_setup_ms
+property_filter_context_ms
+time_values_clone_ms
+actuals_row_key_ms
+forecast_membership_ms
+resolver_batch_extract_ms
+warning_collection_ms
+column_lookup_ms
+duplicate_check_ms
+debug_logging_overhead_ms
+```
+
+Add these memory/allocation-oriented metrics where practical:
+
+```text
+estimated_allocated_bytes
+peak_memory_mb
+number_column_clone_count
+string_column_clone_count
+recordbatch_clone_count
+formula_context_clone_count
+warning_clone_count
+debug_vector_allocation_count
+```
+
+---
+
+## Benchmark Scenarios
+
+Add benchmark scenarios for:
 
 ```text
 small model
 medium model
 large wide model
 large row-count model
+many-block model
 cross-object-heavy model
 actuals-heavy model
 sequential-heavy model
 property-heavy model
+connected-dimension-heavy model
+formula-heavy model
+lookup-aggregation-heavy model
+RecordBatch-heavy output model
+debug-disabled run
+debug-enabled run
 ```
 
-Suggested flags:
+Each benchmark result should record model shape:
+
+```text
+block_count
+node_count
+row_count_per_block
+total_row_count
+dimension_count
+indicator_count
+property_node_count
+cross_object_reference_count
+sequential_node_count
+input_node_count
+calculation_node_count
+```
+
+---
+
+## Suggested Flags / Configuration
+
+Add or support flags such as:
 
 ```text
 CALC_DEBUG=false by default
 CALC_PERF_TRACE=false by default
 CALC_BENCH_MODE=true only in benchmark runs
+CALC_LOG_HOT_PATH_DETAILS=false by default
+```
+
+Expected behavior:
+
+```text
+normal execution should not collect expensive debug data
+benchmark mode can collect structured phase timings
+debug mode can collect detailed diagnostics intentionally
 ```
 
 ---
@@ -380,7 +717,10 @@ CALC_BENCH_MODE=true only in benchmark runs
 2. Prevents performance regressions.
 3. Helps decide where Rayon is actually useful.
 4. Helps identify clone-heavy and allocation-heavy paths.
-5. Provides safe baseline before scheduler changes.
+5. Helps identify whether the bottleneck is execution, preload, resolver, joins, actuals, or output materialization.
+6. Provides safe baseline before scheduler changes.
+7. Makes it easier to prove improvements from Final Issue 2 through Final Issue 10.
+8. Removes misleading debug overhead from production performance.
 ```
 
 ---
@@ -391,12 +731,21 @@ CALC_BENCH_MODE=true only in benchmark runs
 1. Benchmark harness exists.
 2. At least small, medium, and large model benchmarks exist.
 3. Benchmarks can compare serial vs optimized paths.
-4. Phase-level timing is available.
-5. Debug/hot-path logs do not allocate unless enabled.
-6. Hardcoded block/node debug logs are removed or gated.
-7. Baseline numbers are documented before other optimization work begins.
-8. Performance regression checks can be added to CI or run manually.
-9. Benchmark results can be used by later issues to prove improvement.
+4. Benchmarks can compare debug-disabled vs debug-enabled execution.
+5. Phase-level timing is available.
+6. Detailed timing is available for preload, resolver, formula, actuals, join, and RecordBatch paths.
+7. PreloadedMetadata bulk vs fallback PyO3 preload timing is available.
+8. Calculation dependency-resolution timing is available.
+9. Actuals row-key and forecast membership timing is available.
+10. Resolver RecordBatch extraction timing is available.
+11. Column lookup / duplicate-check timing is available.
+12. Warning collection / warning clone timing is available.
+13. Debug/tracing overhead timing is available.
+14. Debug/hot-path logs do not allocate unless enabled.
+15. Hardcoded block/node debug logs are removed or gated.
+16. Baseline numbers are documented before other optimization work begins.
+17. Performance regression checks can be added to CI or run manually.
+18. Benchmark results can be used by later issues to prove improvement.
 ```
 
 ---
@@ -407,14 +756,25 @@ Add tests / benchmark cases for:
 
 ```text
 full serial execution
+future Kahn scheduler execution
+future Rayon execution
 large formula evaluation
+formula evaluator setup
 wide block column lookup
+duplicate column check
 large cross-object join
 lookup aggregation
 RecordBatch output
 connected dimension preload
+PreloadedMetadata bulk preload
+PreloadedMetadata fallback preload
+property extraction
 actuals-heavy block
+actuals row-key construction
+forecast membership check
 sequential-heavy block
+resolver batch extraction
+warning collection
 debug disabled path
 debug enabled path
 ```
@@ -425,12 +785,22 @@ debug enabled path
 
 ```text
 Changing calculation semantics
-Adding Rayon execution
+Adding Rayon ready-node execution
 Changing output format
 Changing Python DAG manager behavior
 Refactoring scheduler
 Changing resolver logic
+Optimizing data structures
+Reducing clones
+Changing PreloadedMetadata shape
+Changing formula evaluation behavior
+Changing actuals behavior
+Changing join semantics
 ```
+
+This issue is measurement and cleanup only.
+
+Implementation changes for optimization should happen in later final issues.
 
 ---
 
@@ -446,6 +816,17 @@ Highest
 None
 ```
 
+This issue should be completed before:
+
+```text
+Final Issue 2 - Data Structure, Clone Reduction, Shared References, FormulaEvaluator Context, and Typed IDs Foundation
+Final Issue 3 - Core Kahn-Style Scheduler Foundation + Worker-Safe PreloadedMetadata
+Final Issue 4 - Actuals, Forecast, and Dimension Row Metadata Optimization
+Final Issue 5 - Cross-Object Join, Lookup, Aggregation, and Join-Key Optimization
+Final Issue 6 - Pre/Post Processing Parallelism
+Final Issue 10 - Configurable Rayon-Based Parallel Ready-Node Execution
+```
+
 ---
 
 ## Labels
@@ -459,6 +840,9 @@ profiling
 debug-cleanup
 regression-gates
 observability
+phase-timing
+hot-path-cleanup
+memory-profiling
 ```
 
 ---
@@ -471,8 +855,31 @@ Rust Engine
 Benchmarking
 Performance
 Debugging
+Observability
+Executor
+Formula Evaluation
+Preload
+Resolver
+RecordBatch Materialization
 ```
 
+---
+
+## Final Notes
+
+This issue is the required first step for the Omni-Calc performance roadmap.
+
+It should answer:
+
+```text
+Where is time currently spent?
+Where are allocations happening?
+Which debug paths distort runtime?
+Which phase should be optimized first?
+Which later issue produced measurable improvement?
+```
+
+Once this issue is complete, all later issues should use its benchmark harness and baseline numbers to prove correctness and performance improvement.
 ---
 
 # FINAL ISSUE 2
