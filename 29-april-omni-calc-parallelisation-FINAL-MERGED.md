@@ -868,7 +868,6 @@ Typed IDs
 ```
 
 ---
-
 # FINAL ISSUE 3
 
 ## Issue Type
@@ -879,7 +878,7 @@ Technical Task / Refactor
 
 ## Title
 
-Refactor Rust Omni-Calc Executor Toward Safe Kahn-Style DAG Scheduling Foundation and Worker-Safe PreloadedMetadata
+Refactor Rust Omni-Calc Executor Toward Safe Kahn-Style DAG Scheduling Foundation, Worker-Safe PreloadedMetadata, and Cached Formula Dependency Metadata
 
 ---
 
@@ -888,6 +887,12 @@ Refactor Rust Omni-Calc Executor Toward Safe Kahn-Style DAG Scheduling Foundatio
 ```text
 Source Issue 1  - Core scheduler foundation
 Source Issue 10 - Expand and Normalize PreloadedMetadata for Worker-Safe Execution
+```
+
+Additional performance/scheduler scope added into this issue:
+
+```text
+Cached parsed formula AST and dependency metadata
 ```
 
 ---
@@ -900,21 +905,31 @@ Source Issue 10 is:
 Expand and Normalize PreloadedMetadata for Worker-Safe Execution
 ```
 
-It is not:
+It is **not**:
 
 ```text
 Cached parsed formula AST and dependency metadata
 ```
 
-This issue must therefore cover complete preload normalization and worker-safe metadata access.
+However, **cached parsed formula AST and dependency metadata should still be included in this final issue** because it directly supports Rust-side graph construction, dependency detection, and Kahn-style scheduling.
+
+So this final issue covers:
+
+```text
+1. Core scheduler foundation
+2. Worker-safe normalized PreloadedMetadata
+3. Cached parsed formula AST and formula dependency metadata
+```
+
+This updated version extends the earlier Final Issue 3 content with the missing formula-cache/dependency-metadata scope. :contentReference[oaicite:0]{index=0}
 
 ---
 
 ## Summary
 
-Build the safe architecture required before true parallel execution.
+Build the safe Rust execution architecture required before true parallel execution.
 
-The current Rust executor processes Python-provided `calc_steps` sequentially and mutates a shared `ExecutionContext`.
+The current Rust Omni-Calc executor processes Python-provided `calc_steps` sequentially and mutates a shared `ExecutionContext`.
 
 Target flow:
 
@@ -923,13 +938,15 @@ Current serial executor
     ↓
 Complete normalized PreloadedMetadata
     ↓
+Cached parsed formula AST + dependency metadata
+    ↓
 ExecutionSnapshot
     ↓
 NodeOutput
     ↓
 Central merge phase
     ↓
-Explicit ExecutionGraph
+Explicit Rust-side ExecutionGraph
     ↓
 Single-threaded Kahn scheduler
     ↓
@@ -938,11 +955,19 @@ Serial parity proven
 Ready for Rayon in later issue
 ```
 
+This issue should **not** implement Rayon parallel execution yet. It should build the correct architecture first.
+
 ---
 
 ## Background / Context
 
-Current simplified executor flow:
+The current Rust executor flow is mainly in:
+
+```text
+modelAPI/omni-calc/src/engine/exec/executor.rs
+```
+
+Current simplified execution flow:
 
 ```rust
 pub fn execute(_engine: &mut Engine, plan: Plan) -> Result<CalcResult> {
@@ -972,13 +997,14 @@ Python provides ordered calc_steps
 Rust executes each step sequentially
 Each step mutates ExecutionContext
 Resolver is updated during node processing
+Formula dependency information is not owned as a scheduler-ready Rust graph
 ```
 
 Rust does not currently own an explicit ready queue / Kahn scheduler.
 
 ---
 
-## Problem Statement
+## Current Execution Limitations
 
 Current executor limitations:
 
@@ -992,13 +1018,37 @@ Current executor limitations:
 7. Property maps and dimension items must be complete before execution.
 8. Worker-safe execution cannot call Python/PyO3.
 9. Sequential groups must remain atomic.
+10. Formula dependency metadata is not yet represented as reusable scheduler-ready Rust metadata.
+11. Parsed formula AST / dependency extraction may be repeated or distributed across execution paths.
 ```
+
+---
+
+## Problem Statement
+
+The current serial executor is safe because only one node executes at a time, but it is not structured for safe parallelism.
+
+A future parallel-ready executor needs:
+
+```text
+immutable node inputs
+per-node outputs
+centralized shared-state mutation
+explicit dependency graph
+complete preloaded metadata
+cached formula dependency metadata
+safe resolver snapshots
+deterministic output merge
+single-threaded Kahn parity before Rayon
+```
+
+Without this refactor, adding parallelism would either be unsafe or would require a global lock around `ExecutionContext`, which would serialize execution and provide little real performance benefit.
 
 ---
 
 ## Scope
 
-### 1. Complete and Normalize PreloadedMetadata
+## 1. Complete and Normalize PreloadedMetadata
 
 Current preload direction:
 
@@ -1009,7 +1059,7 @@ pub struct PreloadedMetadata {
 }
 ```
 
-This issue should expand/normalize preload so worker execution has everything required without Python callbacks.
+This issue should expand and normalize preload so worker execution has everything required without Python callbacks.
 
 Required preload coverage:
 
@@ -1026,9 +1076,11 @@ metadata needed for cross-object joins
 metadata needed for connected dimensions
 metadata needed for filters
 metadata needed by formula evaluation
+metadata needed by formula dependency extraction
+metadata needed by ExecutionSnapshot creation
 ```
 
-Preloaded data should be stored in Rust-owned immutable structures:
+Preloaded data should be stored in Rust-owned immutable/shared structures:
 
 ```rust
 Arc<PreloadedMetadata>
@@ -1044,41 +1096,201 @@ Do not lazy-load missing metadata from Python during execution.
 
 ---
 
-### 2. Add ExecutionSnapshot
+## 2. Add Cached Parsed Formula AST and Dependency Metadata
+
+This is the newly added missing scope.
+
+The executor should avoid repeatedly parsing formulas or repeatedly deriving dependencies during execution.
+
+Instead, formula parsing and dependency extraction should happen once during planning / graph build / scheduler preparation.
+
+### Proposed types
+
+```rust
+struct PlannedFormula {
+    node_id: NodeId,
+    block_id: BlockId,
+    parsed_ast: Arc<FormulaAst>,
+    dependency_info: FormulaDependencyInfo,
+}
+```
+
+```rust
+struct FormulaDependencyInfo {
+    direct_indicator_deps: Vec<NodeId>,
+    cross_object_refs: Vec<CrossObjectRef>,
+    property_refs: Vec<PropertyRef>,
+    dimension_refs: Vec<DimensionId>,
+    connected_dimension_refs: Vec<DimensionId>,
+    variable_filter_refs: Vec<VariableFilterRef>,
+    uses_actuals: bool,
+    uses_sequential_functions: bool,
+    sequential_functions: Vec<String>,
+}
+```
+
+```rust
+struct CrossObjectRef {
+    source_block_id: BlockId,
+    source_node_id: NodeId,
+    variable_name: String,
+}
+```
+
+```rust
+struct PropertyRef {
+    dimension_id: DimensionId,
+    property_id: PropertyId,
+    scenario_id: Option<i64>,
+}
+```
+
+### Why this belongs here
+
+The Kahn scheduler needs to know:
+
+```text
+which nodes depend on which indicators
+which nodes depend on cross-object source blocks
+which nodes depend on property metadata
+which nodes require connected dimensions
+which nodes are sequential / not parallel-safe
+which nodes can be added to the ready queue
+```
+
+Formula AST and dependency metadata are therefore part of the scheduler foundation.
+
+### Current problem this solves
+
+Without cached formula dependency metadata:
+
+```text
+dependency extraction may be repeated
+graph building may rely on fragile string scanning
+formula parsing may happen too late
+scheduler readiness may miss hidden dependencies
+cross-object dependencies may remain implicit
+sequential formulas may be misclassified
+```
+
+### Target behavior
+
+During scheduler setup:
+
+```text
+for each formula node:
+    parse formula once
+    extract dependency metadata once
+    store PlannedFormula
+    use dependency metadata to build ExecutionGraph
+    use parsed AST during execution
+```
+
+Execution should then use:
+
+```rust
+planned_formula.parsed_ast
+```
+
+instead of reparsing or rediscovering dependencies.
+
+### Required dependency coverage
+
+Dependency metadata should cover:
+
+```text
+same-block indicator dependencies
+cross-block / cross-object indicator dependencies
+property references
+dimension references
+connected dimension references
+variable filters
+node maps
+actuals dependency flags
+sequential function flags
+```
+
+### Benefits
+
+```text
+1. Faster graph construction after first parse.
+2. Less repeated formula parsing.
+3. Cleaner dependency graph construction.
+4. More reliable Kahn scheduler readiness.
+5. Easier detection of parallel-safe vs non-parallel-safe nodes.
+6. Better diagnostics when dependencies are missing.
+7. Better support for future Rayon execution.
+```
+
+---
+
+## 3. Add ExecutionSnapshot
+
+Add a read-only node input structure.
+
+Example:
 
 ```rust
 struct ExecutionSnapshot {
     block_key: String,
     block_spec: Arc<BlockSpec>,
+
     dim_columns: Arc<...>,
     number_columns: Arc<...>,
     string_columns: Arc<...>,
     connected_dim_columns: Arc<...>,
+
     resolver_snapshot: Arc<CrossObjectResolverSnapshot>,
     preloaded_metadata: Arc<PreloadedMetadata>,
     property_cache_snapshot: Arc<PropertyCacheSnapshot>,
+    planned_formula: Option<Arc<PlannedFormula>>,
 }
 ```
 
+Purpose:
+
+```text
+ExecutionSnapshot = read-only worker/node input
+```
+
+A node should be executable using snapshot data without mutating global executor state.
+
 ---
 
-### 3. Add NodeOutput
+## 4. Add NodeOutput
+
+Node execution should return output instead of directly mutating `ExecutionContext`.
+
+Example:
 
 ```rust
 struct NodeOutput {
     block_key: String,
+
     number_columns: Vec<...>,
     string_columns: Vec<...>,
     connected_dim_columns: Vec<...>,
+
     warnings: Vec<CalcWarning>,
     nodes_calculated: usize,
+
     should_update_resolver: bool,
 }
 ```
 
+Purpose:
+
+```text
+NodeOutput = worker/node result
+```
+
 ---
 
-### 4. Add Central Merge Phase
+## 5. Add Central Merge Phase
+
+Only the merge phase should mutate `ExecutionContext`.
+
+Example:
 
 ```rust
 fn merge_node_output(ctx: &mut ExecutionContext, output: NodeOutput) {
@@ -1086,9 +1298,23 @@ fn merge_node_output(ctx: &mut ExecutionContext, output: NodeOutput) {
 }
 ```
 
+Target behavior:
+
+```text
+execute node
+    ↓
+return NodeOutput
+    ↓
+merge output in deterministic coordinator-owned phase
+```
+
+Do not mutate shared state during node calculation.
+
 ---
 
-### 5. Add ExecutionGraph
+## 6. Add ExecutionGraph
+
+Add explicit Rust-side graph representation.
 
 ```rust
 struct ExecutionGraph {
@@ -1109,9 +1335,36 @@ enum ExecNodeType {
 }
 ```
 
+Node metadata:
+
+```rust
+struct ExecNode {
+    id: NodeId,
+    block_id: BlockId,
+    calc_type: ExecNodeType,
+    deps: Vec<NodeId>,
+    outputs: Vec<ColumnId>,
+    parallel_safe: bool,
+    planned_formula: Option<Arc<PlannedFormula>>,
+}
+```
+
+Graph should be built from:
+
+```text
+CalcPlan.calc_steps
+CalcPlan.blocks
+BlockSpec.indicators
+cached PlannedFormula dependency metadata
+CalcPlan.node_maps
+CalcPlan.variable_filters
+CalcPlan.property_specs
+PreloadedMetadata
+```
+
 ---
 
-### 6. Add Single-Threaded Kahn Scheduler
+## 7. Add Single-Threaded Kahn Scheduler
 
 First implementation must remain single-threaded.
 
@@ -1127,6 +1380,39 @@ update resolver if needed
 decrement dependents
 enqueue newly ready nodes
 ```
+
+Example:
+
+```rust
+let mut ready = VecDeque::new();
+
+for node in graph.nodes.values() {
+    if graph.indegree[&node.id] == 0 {
+        ready.push_back(node.id);
+    }
+}
+
+while let Some(node_id) = ready.pop_front() {
+    let node = graph.nodes[&node_id].clone();
+
+    let snapshot = build_snapshot(&ctx, &node);
+    let output = execute_node(snapshot, node);
+
+    merge_node_output(&mut ctx, output);
+
+    update_resolver_if_needed(&mut ctx, &node);
+
+    for dep in graph.outgoing[&node_id].iter() {
+        graph.indegree[dep] -= 1;
+
+        if graph.indegree[dep] == 0 {
+            ready.push_back(*dep);
+        }
+    }
+}
+```
+
+No Rayon in this issue.
 
 ---
 
@@ -1156,6 +1442,10 @@ struct CrossObjectResolverSnapshot {
 }
 ```
 
+Resolver snapshot should be built only from merged/stable state.
+
+A node should never observe partially merged block state.
+
 ---
 
 ## Sequential Group Requirements
@@ -1176,6 +1466,15 @@ parallel_safe = false
 
 Do not split sequential group nodes into independent parallel nodes.
 
+Sequential formulas/functions should be detected through cached formula dependency metadata:
+
+```text
+uses_sequential_functions = true
+sequential_functions = ["prior", "balance", "change", "rollfwd", ...]
+```
+
+This helps avoid accidentally marking sequential nodes as parallel-safe.
+
 ---
 
 ## Python / Preload Requirement
@@ -1187,6 +1486,7 @@ PreloadedMetadata
 PropertyCacheSnapshot
 ExecutionSnapshot
 Rust-owned plan data
+cached PlannedFormula metadata
 ```
 
 It must not call:
@@ -1196,6 +1496,36 @@ Python<'_>
 PyObject
 metadata_cache.call_method1(...)
 metadata_cache.getattr(...)
+```
+
+If any formula dependency requires metadata not available in `PreloadedMetadata`, execution should fail before scheduling starts.
+
+---
+
+## Rejected Design
+
+Do not solve this by wrapping the full execution context in a global lock.
+
+Rejected:
+
+```rust
+Arc<Mutex<ExecutionContext>>
+```
+
+around full node execution.
+
+Reason:
+
+```text
+This serializes expensive node execution behind one lock and does not provide meaningful parallelism.
+```
+
+Preferred:
+
+```text
+ExecutionSnapshot = read-only input
+NodeOutput = result
+merge_node_output = short deterministic mutation phase
 ```
 
 ---
@@ -1208,7 +1538,10 @@ metadata_cache.getattr(...)
 3. Makes preload completeness explicit and testable.
 4. Enables deterministic merge and resolver update boundaries.
 5. Enables single-threaded Kahn scheduler parity testing.
-6. Prevents global lock based false parallelism.
+6. Prevents global-lock-based false parallelism.
+7. Reduces repeated formula parsing/dependency extraction.
+8. Improves graph construction correctness.
+9. Makes parallel-safe vs non-parallel-safe node classification clearer.
 ```
 
 ---
@@ -1219,17 +1552,20 @@ metadata_cache.getattr(...)
 1. PreloadedMetadata is expanded/normalized for worker-safe execution.
 2. All metadata required by worker-ready execution is available before execution starts.
 3. Missing required metadata fails early with clear diagnostics.
-4. ExecutionSnapshot exists.
-5. NodeOutput exists.
-6. Shared state mutation is centralized in merge.
-7. ExecutionGraph exists.
-8. Graph tracks dependencies, outgoing edges, and indegrees.
-9. Single-threaded Kahn scheduler exists behind config/feature flag.
-10. Single-threaded Kahn output matches current serial calc_steps output.
-11. Resolver updates happen at safe boundaries.
-12. Sequential groups are atomic.
-13. No global Arc<Mutex<ExecutionContext>> production design.
-14. No PyO3/Python callbacks in execution hot path.
+4. Formula parsing/dependency extraction is cached as PlannedFormula or equivalent.
+5. Formula dependency metadata covers same-block, cross-object, property, dimension, filter, and sequential-function dependencies.
+6. ExecutionGraph uses cached formula dependency metadata instead of ad-hoc repeated parsing/scanning.
+7. ExecutionSnapshot exists.
+8. NodeOutput exists.
+9. Shared state mutation is centralized in merge.
+10. ExecutionGraph exists.
+11. Graph tracks dependencies, outgoing edges, and indegrees.
+12. Single-threaded Kahn scheduler exists behind config/feature flag.
+13. Single-threaded Kahn output matches current serial calc_steps output.
+14. Resolver updates happen at safe boundaries.
+15. Sequential groups are atomic.
+16. No global Arc<Mutex<ExecutionContext>> production design.
+17. No PyO3/Python callbacks in execution hot path.
 ```
 
 ---
@@ -1245,6 +1581,17 @@ missing property map
 missing linked dimension property
 missing filter metadata
 preloaded-only mode rejects missing metadata
+
+formula AST cache creation
+formula dependency metadata extraction
+same-block indicator dependency extraction
+cross-object dependency extraction
+property dependency extraction
+dimension dependency extraction
+variable filter dependency extraction
+sequential function detection
+parallel_safe flag classification
+
 ExecutionSnapshot build
 NodeOutput merge
 duplicate column merge
@@ -1272,6 +1619,8 @@ Changing output format
 Changing calculation semantics
 Changing Python DAG manager behavior
 Lazy Python metadata fallback
+Parallel formula evaluation
+Full formula engine rewrite
 ```
 
 ---
@@ -1306,6 +1655,8 @@ node-output
 resolver
 preload
 preloaded-metadata
+formula-ast
+formula-dependency-metadata
 python-ffi
 worker-safe
 parallelism-foundation
@@ -1321,10 +1672,36 @@ Rust Engine
 Executor
 Scheduler
 Preload
+Formula Evaluation
 Cross-Object Resolver
 Python Boundary
 ```
 
+---
+
+## Final Notes
+
+This issue is the core foundation for future Omni-Calc parallelism.
+
+It should prove correctness in a single-threaded scheduler before any Rayon ready-node execution is added.
+
+The correct order is:
+
+```text
+Complete normalized PreloadedMetadata
+    ↓
+Cache parsed formula AST + dependency metadata
+    ↓
+Build ExecutionSnapshot / NodeOutput / merge phase
+    ↓
+Build ExecutionGraph
+    ↓
+Run single-threaded Kahn scheduler
+    ↓
+Prove parity with current serial calc_steps executor
+    ↓
+Enable Rayon parallel execution in a later issue
+```
 ---
 
 # FINAL ISSUE 4
